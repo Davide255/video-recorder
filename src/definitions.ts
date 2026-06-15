@@ -21,10 +21,37 @@ export interface VideoRecorderPlugin {
   getDuration(): Promise<{
     value: number;
   }>;
+  /**
+   * Enables the microphone audio track. Takes effect immediately if recording is in progress.
+   * iOS only.
+   */
+  enableMicrophone(): Promise<void>;
+  /**
+   * Disables the microphone audio track. Takes effect immediately if recording is in progress.
+   * iOS only.
+   */
+  disableMicrophone(): Promise<void>;
+  /**
+   * Returns all available physical cameras on the device.
+   * iOS only.
+   */
+  getAvailableCameras(): Promise<{ cameras: VideoRecorderCameraInfo[] }>;
+  /**
+   * Switches to a specific camera by its id (from getAvailableCameras).
+   * iOS only.
+   */
+  switchCamera(options: { cameraId: string }): Promise<void>;
   addListener(
     eventName: 'onVolumeInput',
     listenerFunc: (event: { value: number }) => void,
   ): Promise<PluginListenerHandle>;
+}
+
+export interface VideoRecorderCameraInfo {
+  /** Unique device identifier to pass to switchCamera */
+  id: string;
+  position: 'front' | 'back';
+  type: 'wide' | 'ultrawide' | 'telephoto';
 }
 export interface VideoRecorderPreviewFrame {
   id: string;

@@ -180,6 +180,10 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
         CAPPluginMethod(name: "startRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getDuration", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "enableMicrophone", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "disableMicrophone", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getAvailableCameras", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "switchCamera", returnType: CAPPluginReturnPromise),
     ]
 
     var capWebView: WKWebView!
@@ -198,9 +202,11 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
     var currentCamera: Int = 0
     var frontCamera: AVCaptureDevice?
     var backCamera: AVCaptureDevice?
+    var allCameras: [AVCaptureDevice] = []
     var quality: Int = 0
     var videoBitrate: Int = 3000000
     var _isFlashEnabled: Bool = false
+    var isMicrophoneEnabled: Bool = true
 
     var stopRecordingCall: CAPPluginCall?
 
@@ -414,6 +420,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 self.currentCamera = 0
                 self.frontCamera = nil
                 self.backCamera = nil
+                self.allCameras = []
+                self.isMicrophoneEnabled = true
                 self.notifyListeners("onVolumeInput", data: ["value":0])
             }
             call.resolve()
@@ -648,18 +656,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                         connection.automaticallyAdjustsVideoMirroring = false
                         connection.isVideoMirrored = false
                     }
-                    // turn on flash if flash is enabled and camera is back camera
-                    if (self.currentCamera == 1 && self._isFlashEnabled) {
-                        let device = AVCaptureDevice.default(for: .video)
-                        if let device = device {
-                            do {
-                                try device.lockForConfiguration()
-                                try device.setTorchModeOn(level: 1.0)
-                                device.unlockForConfiguration()
-                            } catch {
-                                // ignore error
-                            }
-                        }
+                    self.applyTorchState()
+                    if let audioConnection = self.videoOutput?.connection(with: .audio) {
+                        audioConnection.isEnabled = self.isMicrophoneEnabled
                     }
                     self.videoOutput?.startRecording(to: fileUrl, recordingDelegate: self)
                     call.resolve()
@@ -677,18 +676,13 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 self.stopRecordingCall = call
                 self.videoOutput!.stopRecording()
 
-                // turn off flash if flash is enabled and camera is back camera
-                if (self.currentCamera == 1 && self._isFlashEnabled) {
-                    let device = AVCaptureDevice.default(for: .video)
-                    if let device = device {
-                        do {
-                            try device.lockForConfiguration()
-                            device.torchMode = .off
-                            device.unlockForConfiguration()
-                        } catch {
-                            // ignore error
-                        }
-                    }
+                if self.currentCamera == 1 {
+                    guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+                    do {
+                        try device.lockForConfiguration()
+                        device.torchMode = .off
+                        device.unlockForConfiguration()
+                    } catch {}
                 }
             }
         }
@@ -710,6 +704,96 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
         }
     }
 
+    @objc func enableMicrophone(_ call: CAPPluginCall) {
+        self.isMicrophoneEnabled = true
+        if videoOutput?.isRecording != true {
+            if let audioConnection = self.videoOutput?.connection(with: .audio) {
+                audioConnection.isEnabled = true
+            }
+        }
+        call.resolve()
+    }
+
+    @objc func disableMicrophone(_ call: CAPPluginCall) {
+        self.isMicrophoneEnabled = false
+        if videoOutput?.isRecording != true {
+            if let audioConnection = self.videoOutput?.connection(with: .audio) {
+                audioConnection.isEnabled = false
+            }
+        }
+        call.resolve()
+    }
+
+    @objc func getAvailableCameras(_ call: CAPPluginCall) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if self.allCameras.isEmpty {
+                let discovery = AVCaptureDevice.DiscoverySession(
+                    deviceTypes: [
+                        .builtInWideAngleCamera,
+                        .builtInUltraWideCamera,
+                        .builtInTelephotoCamera
+                    ],
+                    mediaType: .video,
+                    position: .unspecified
+                )
+                self.allCameras = discovery.devices
+            }
+            let cameras: [[String: Any]] = self.allCameras.map { device in
+                let position = device.position == .front ? "front" : "back"
+                var type = "wide"
+                if #available(iOS 13.0, *) {
+                    switch device.deviceType {
+                    case .builtInUltraWideCamera: type = "ultrawide"
+                    case .builtInTelephotoCamera: type = "telephoto"
+                    default: type = "wide"
+                    }
+                }
+                return ["id": device.uniqueID, "position": position, "type": type]
+            }
+            call.resolve(["cameras": cameras])
+        }
+    }
+
+    @objc func switchCamera(_ call: CAPPluginCall) {
+        guard self.captureSession != nil else {
+            call.reject("Camera not initialized")
+            return
+        }
+        guard let cameraId = call.getString("cameraId") else {
+            call.reject("Must provide cameraId")
+            return
+        }
+        guard let device = self.allCameras.first(where: { $0.uniqueID == cameraId }) else {
+            call.reject("Camera not found")
+            return
+        }
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            self.captureSession?.beginConfiguration()
+            if let currentInput = self.cameraInput {
+                self.captureSession?.removeInput(currentInput)
+            }
+            guard self.captureSession?.canAddInput(input) == true else {
+                if let currentInput = self.cameraInput {
+                    self.captureSession?.addInput(currentInput)
+                }
+                self.captureSession?.commitConfiguration()
+                call.reject("Cannot use selected camera in current session")
+                return
+            }
+            self.captureSession?.addInput(input)
+            self.cameraInput = input
+            self.currentCamera = device.position == .front ? 0 : 1
+            self.captureSession?.commitConfiguration()
+            DispatchQueue.main.async {
+                self.updateCameraView(self.currentFrameConfig)
+            }
+            call.resolve()
+        } catch {
+            call.reject("Could not switch camera: \(error.localizedDescription)")
+        }
+    }
+
     @objc func isFlashAvailable(_ call: CAPPluginCall) {
         if (self.captureSession != nil) {
             let device = AVCaptureDevice.default(for: .video)
@@ -727,16 +811,33 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
 
     @objc func enableFlash(_ call: CAPPluginCall) {
         self._isFlashEnabled = true
+        self.applyTorchState()
         call.resolve()
     }
 
     @objc func disableFlash(_ call: CAPPluginCall) {
         self._isFlashEnabled = false
+        self.applyTorchState()
         call.resolve()
     }
 
     @objc func toggleFlash(_ call: CAPPluginCall) {
         self._isFlashEnabled = !self._isFlashEnabled
+        self.applyTorchState()
         call.resolve()
+    }
+
+    private func applyTorchState() {
+        guard self.currentCamera == 1 else { return }
+        guard let device = AVCaptureDevice.default(for: .video), device.hasTorch else { return }
+        do {
+            try device.lockForConfiguration()
+            if self._isFlashEnabled {
+                try device.setTorchModeOn(level: 1.0)
+            } else {
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+        } catch {}
     }
 }

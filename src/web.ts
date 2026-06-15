@@ -1,6 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { VideoRecorderPlugin, VideoRecorderOptions, VideoRecorderPreviewFrame } from './definitions';
+import type { VideoRecorderPlugin, VideoRecorderOptions, VideoRecorderPreviewFrame, VideoRecorderCameraInfo } from './definitions';
 
 class DropShadow {
 	opacity?: number;
@@ -210,5 +210,25 @@ export class VideoRecorderWeb extends WebPlugin implements VideoRecorderPlugin {
 	isFlashAvailable(): Promise<{ isAvailable: boolean; }> {
 		console.warn('VideoRecorder: No web mock available for isFlashAvailable');
 		return Promise.resolve({ isAvailable: false });
+	}
+
+	enableMicrophone(): Promise<void> {
+		console.warn('VideoRecorder: No web mock available for enableMicrophone');
+		return Promise.resolve();
+	}
+
+	disableMicrophone(): Promise<void> {
+		console.warn('VideoRecorder: No web mock available for disableMicrophone');
+		return Promise.resolve();
+	}
+
+	getAvailableCameras(): Promise<{ cameras: VideoRecorderCameraInfo[] }> {
+		console.warn('VideoRecorder: No web mock available for getAvailableCameras');
+		return Promise.resolve({ cameras: [] });
+	}
+
+	switchCamera(_options: { cameraId: string }): Promise<void> {
+		console.warn('VideoRecorder: No web mock available for switchCamera');
+		return Promise.resolve();
 	}
 }

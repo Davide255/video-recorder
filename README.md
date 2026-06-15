@@ -145,6 +145,10 @@ The demo app can be found in the Example folder of this repo
 * [`startRecording()`](#startrecording)
 * [`stopRecording()`](#stoprecording)
 * [`getDuration()`](#getduration)
+* [`enableMicrophone()`](#enablemicrophone)
+* [`disableMicrophone()`](#disablemicrophone)
+* [`getAvailableCameras()`](#getavailablecameras)
+* [`switchCamera(...)`](#switchcamera)
 * [`addListener('onVolumeInput', ...)`](#addlisteneronvolumeinput-)
 * [Interfaces](#interfaces)
 * [Enums](#enums)
@@ -326,6 +330,60 @@ getDuration() => Promise<{ value: number; }>
 --------------------
 
 
+### enableMicrophone()
+
+```typescript
+enableMicrophone() => Promise<void>
+```
+
+Enables the microphone audio track. Takes effect immediately if recording is in progress.
+iOS only.
+
+--------------------
+
+
+### disableMicrophone()
+
+```typescript
+disableMicrophone() => Promise<void>
+```
+
+Disables the microphone audio track. Takes effect immediately if recording is in progress.
+iOS only.
+
+--------------------
+
+
+### getAvailableCameras()
+
+```typescript
+getAvailableCameras() => Promise<{ cameras: VideoRecorderCameraInfo[]; }>
+```
+
+Returns all available physical cameras on the device.
+iOS only.
+
+**Returns:** <code>Promise&lt;{ cameras: VideoRecorderCameraInfo[]; }&gt;</code>
+
+--------------------
+
+
+### switchCamera(...)
+
+```typescript
+switchCamera(options: { cameraId: string; }) => Promise<void>
+```
+
+Switches to a specific camera by its id (from getAvailableCameras).
+iOS only.
+
+| Param         | Type                               |
+| ------------- | ---------------------------------- |
+| **`options`** | <code>{ cameraId: string; }</code> |
+
+--------------------
+
+
 ### addListener('onVolumeInput', ...)
 
 ```typescript
@@ -369,6 +427,15 @@ addListener(eventName: 'onVolumeInput', listenerFunc: (event: { value: number; }
 | **`borderRadius`**   | <code>number</code>                                                 |                                                                                        |                   |
 | **`dropShadow`**     | <code>{ opacity?: number; radius?: number; color?: string; }</code> |                                                                                        |                   |
 | **`mirrorFrontCam`** | <code>boolean</code>                                                | Whether to mirror the front camera preview horizontally. Only applies to front camera. | <code>true</code> |
+
+
+#### VideoRecorderCameraInfo
+
+| Prop           | Type                                              | Description                                      |
+| -------------- | ------------------------------------------------- | ------------------------------------------------ |
+| **`id`**       | <code>string</code>                               | Unique device identifier to pass to switchCamera |
+| **`position`** | <code>'front' \| 'back'</code>                    |                                                  |
+| **`type`**     | <code>'wide' \| 'ultrawide' \| 'telephoto'</code> |                                                  |
 
 
 #### PluginListenerHandle
