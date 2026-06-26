@@ -48,6 +48,7 @@ public class VideoRecorderPlugin extends Plugin {
     private boolean timerStarted;
     private Integer videoBitrate = 3000000;
     private boolean _isFlashEnabled = false;
+    private boolean isRecording = false;
     private Integer previousBackgroundColor = null;
 
     PluginCall getCall() {
@@ -310,6 +311,7 @@ public class VideoRecorderPlugin extends Plugin {
             fancyCamera.enableFlash();
         }
 
+        isRecording = true;
         fancyCamera.startRecording();
         call.resolve();
     }
@@ -317,6 +319,7 @@ public class VideoRecorderPlugin extends Plugin {
     @PluginMethod()
     public void stopRecording(PluginCall call) {
         this.call = call;
+        isRecording = false;
 
         // turn off flash if flash is enabled and camera is back camera
         if (this._isFlashEnabled && fancyCamera.getCameraPosition() == 0) {
@@ -328,6 +331,10 @@ public class VideoRecorderPlugin extends Plugin {
 
     @PluginMethod()
     public void flipCamera(PluginCall call) {
+        if (isRecording) {
+            call.reject("Cannot switch camera while recording");
+            return;
+        }
         fancyCamera.toggleCamera();
 
         // Update our tracked camera position

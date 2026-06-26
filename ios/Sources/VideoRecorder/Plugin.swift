@@ -209,6 +209,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
     var isMicrophoneEnabled: Bool = true
 
     var stopRecordingCall: CAPPluginCall?
+    var recordingSegments: [URL] = []
+    var pendingCameraSwitch: (() -> Void)?
+    var shouldStopAfterSwitch: Bool = false
 
     var previewFrameConfigs: [FrameConfig] = []
     var currentFrameConfig: FrameConfig = FrameConfig(["id": "default"])
@@ -224,10 +227,138 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
      * AVCaptureFileOutputRecordingDelegate
      */
     public func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        recordingSegments.append(outputFileURL)
+
+        if let switchAction = pendingCameraSwitch {
+            pendingCameraSwitch = nil
+            switchAction()
+            if shouldStopAfterSwitch {
+                shouldStopAfterSwitch = false
+                DispatchQueue.main.async { self.videoOutput?.stopRecording() }
+            }
+            return
+        }
+
         self.durationTimer?.invalidate()
-        self.stopRecordingCall?.resolve([
-            "videoUrl": self.bridge?.portablePath(fromLocalURL: outputFileURL)?.absoluteString as Any
-        ])
+        finalizeRecording()
+    }
+
+    private func finalizeRecording() {
+        guard !recordingSegments.isEmpty else {
+            self.stopRecordingCall?.reject("No recorded segments")
+            return
+        }
+        if recordingSegments.count == 1 {
+            let url = recordingSegments[0]
+            recordingSegments = []
+            self.stopRecordingCall?.resolve([
+                "videoUrl": self.bridge?.portablePath(fromLocalURL: url)?.absoluteString as Any
+            ])
+        } else {
+            let segments = recordingSegments
+            recordingSegments = []
+            mergeRecordingSegments(segments) { mergedURL in
+                if let url = mergedURL {
+                    self.stopRecordingCall?.resolve([
+                        "videoUrl": self.bridge?.portablePath(fromLocalURL: url)?.absoluteString as Any
+                    ])
+                } else {
+                    self.stopRecordingCall?.reject("Failed to merge video segments")
+                }
+            }
+        }
+    }
+
+    private func beginRecordingSegment() {
+        let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
+        var fileName = randomFileName()
+        fileName.append(".mp4")
+        let fileUrl = NSURL.fileURL(withPath: joinPath(left: tempDir.path, right: fileName))
+
+        DispatchQueue.main.async {
+            let videoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: self.videoBitrate]
+            ]
+            if let connection = self.videoOutput?.connection(with: .video) {
+                self.videoOutput?.setOutputSettings(videoSettings, for: connection)
+                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                    connection.videoOrientation = self.cameraView.interfaceOrientationToVideoOrientation(windowScene.interfaceOrientation)
+                }
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = false
+            }
+            if let audioConnection = self.videoOutput?.connection(with: .audio) {
+                audioConnection.isEnabled = self.isMicrophoneEnabled
+            }
+            self.videoOutput?.startRecording(to: fileUrl, recordingDelegate: self)
+        }
+    }
+
+    private func performCameraSwitch(to newInput: AVCaptureDeviceInput, newCameraPosition: Int) {
+        self.captureSession?.beginConfiguration()
+        if let current = self.cameraInput {
+            self.captureSession?.removeInput(current)
+        }
+        self.captureSession?.addInput(newInput)
+        self.cameraInput = newInput
+        self.currentCamera = newCameraPosition
+        self.captureSession?.commitConfiguration()
+        DispatchQueue.main.async {
+            self.updateCameraView(self.currentFrameConfig)
+        }
+    }
+
+    private func mergeRecordingSegments(_ segments: [URL], completion: @escaping (URL?) -> Void) {
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            completion(nil)
+            return
+        }
+
+        var insertTime = CMTime.zero
+        var preferredTransform: CGAffineTransform?
+
+        for url in segments {
+            let asset = AVAsset(url: url)
+            let timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+            do {
+                if let vTrack = asset.tracks(withMediaType: .video).first {
+                    try videoTrack.insertTimeRange(timeRange, of: vTrack, at: insertTime)
+                    if preferredTransform == nil { preferredTransform = vTrack.preferredTransform }
+                }
+                if let aTrack = asset.tracks(withMediaType: .audio).first {
+                    try audioTrack.insertTimeRange(timeRange, of: aTrack, at: insertTime)
+                }
+            } catch {
+                completion(nil)
+                return
+            }
+            insertTime = CMTimeAdd(insertTime, asset.duration)
+        }
+
+        if let transform = preferredTransform { videoTrack.preferredTransform = transform }
+
+        let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
+        var fileName = randomFileName()
+        fileName.append(".mp4")
+        let outputURL = NSURL.fileURL(withPath: joinPath(left: tempDir.path, right: fileName))
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            completion(nil)
+            return
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.exportAsynchronously {
+            if exportSession.status == .completed {
+                for url in segments { try? FileManager.default.removeItem(at: url) }
+                completion(outputURL)
+            } else {
+                completion(nil)
+            }
+        }
     }
 
     @objc func levelTimerCallback(_ timer: Timer?) {
@@ -422,6 +553,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 self.backCamera = nil
                 self.allCameras = []
                 self.isMicrophoneEnabled = true
+                self.recordingSegments = []
+                self.pendingCameraSwitch = nil
+                self.shouldStopAfterSwitch = false
                 self.notifyListeners("onVolumeInput", data: ["value":0])
             }
             call.resolve()
@@ -432,41 +566,38 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
 	* Toggle between the front facing and rear facing camera.
 	*/
     @objc func flipCamera(_ call: CAPPluginCall) {
-        if (self.captureSession != nil) {
-            var input: AVCaptureDeviceInput? = nil
-            do {
-                self.currentCamera = self.currentCamera == 0 ? 1 : 0
-                input = try createCaptureDeviceInput(currentCamera: self.currentCamera, frontCamera: self.frontCamera, backCamera: self.backCamera)
-            } catch CaptureError.backCameraUnavailable {
-                self.currentCamera = self.currentCamera == 0 ? 1 : 0
-                call.reject("Back camera unavailable")
-            } catch CaptureError.frontCameraUnavailable {
-                self.currentCamera = self.currentCamera == 0 ? 1 : 0
-                call.reject("Front camera unavailable")
-            } catch CaptureError.couldNotCaptureInput( _) {
-                self.currentCamera = self.currentCamera == 0 ? 1 : 0
-                call.reject("Camera unavailable")
-            } catch {
-                self.currentCamera = self.currentCamera == 0 ? 1 : 0
-                call.reject("Unexpected error")
-            }
+        guard self.captureSession != nil else { return }
 
-            if (input != nil) {
-                let currentInput = self.cameraInput
-                self.captureSession?.beginConfiguration()
-                self.captureSession?.removeInput(currentInput!)
-                self.captureSession!.addInput(input!)
-                self.cameraInput = input
-                self.captureSession?.commitConfiguration()
-
-                // Update camera view to apply correct mirroring for the new camera
-                DispatchQueue.main.async {
-                    self.updateCameraView(self.currentFrameConfig)
-                }
-
-                call.resolve();
-            }
+        let newCameraPosition = self.currentCamera == 0 ? 1 : 0
+        let newInput: AVCaptureDeviceInput
+        do {
+            newInput = try createCaptureDeviceInput(currentCamera: newCameraPosition, frontCamera: self.frontCamera, backCamera: self.backCamera)
+        } catch CaptureError.backCameraUnavailable {
+            call.reject("Back camera unavailable")
+            return
+        } catch CaptureError.frontCameraUnavailable {
+            call.reject("Front camera unavailable")
+            return
+        } catch CaptureError.couldNotCaptureInput(_) {
+            call.reject("Camera unavailable")
+            return
+        } catch {
+            call.reject("Unexpected error")
+            return
         }
+
+        if videoOutput?.isRecording == true {
+            pendingCameraSwitch = { [weak self] in
+                guard let self = self else { return }
+                self.performCameraSwitch(to: newInput, newCameraPosition: newCameraPosition)
+                self.beginRecordingSegment()
+            }
+            self.videoOutput?.stopRecording()
+        } else {
+            performCameraSwitch(to: newInput, newCameraPosition: newCameraPosition)
+        }
+
+        call.resolve()
     }
 
 	/**
@@ -629,6 +760,10 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
     @objc func startRecording(_ call: CAPPluginCall) {
         if (self.captureSession != nil) {
             if (!(videoOutput?.isRecording)!) {
+                recordingSegments = []
+                pendingCameraSwitch = nil
+                shouldStopAfterSwitch = false
+
                 let tempDir = NSURL.fileURL(withPath:NSTemporaryDirectory(), isDirectory: true)
                 var fileName = randomFileName()
                 fileName.append(".mp4")
@@ -672,8 +807,15 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
 	*/
     @objc func stopRecording(_ call: CAPPluginCall) {
         if (self.captureSession != nil) {
+            self.stopRecordingCall = call
+
+            if pendingCameraSwitch != nil {
+                // A segment transition is in progress; mark to stop once the next segment starts
+                shouldStopAfterSwitch = true
+                return
+            }
+
             if (videoOutput?.isRecording)! {
-                self.stopRecordingCall = call
                 self.videoOutput!.stopRecording()
 
                 if self.currentCamera == 1 {
@@ -768,27 +910,39 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
             return
         }
         do {
-            let input = try AVCaptureDeviceInput(device: device)
-            self.captureSession?.beginConfiguration()
-            if let currentInput = self.cameraInput {
-                self.captureSession?.removeInput(currentInput)
-            }
-            guard self.captureSession?.canAddInput(input) == true else {
-                if let currentInput = self.cameraInput {
-                    self.captureSession?.addInput(currentInput)
+            let newInput = try AVCaptureDeviceInput(device: device)
+            let newCameraPosition = device.position == .front ? 0 : 1
+
+            if videoOutput?.isRecording == true {
+                pendingCameraSwitch = { [weak self] in
+                    guard let self = self else { return }
+                    self.performCameraSwitch(to: newInput, newCameraPosition: newCameraPosition)
+                    self.beginRecordingSegment()
                 }
+                self.videoOutput?.stopRecording()
+                call.resolve()
+            } else {
+                self.captureSession?.beginConfiguration()
+                if let currentInput = self.cameraInput {
+                    self.captureSession?.removeInput(currentInput)
+                }
+                guard self.captureSession?.canAddInput(newInput) == true else {
+                    if let currentInput = self.cameraInput {
+                        self.captureSession?.addInput(currentInput)
+                    }
+                    self.captureSession?.commitConfiguration()
+                    call.reject("Cannot use selected camera in current session")
+                    return
+                }
+                self.captureSession?.addInput(newInput)
+                self.cameraInput = newInput
+                self.currentCamera = newCameraPosition
                 self.captureSession?.commitConfiguration()
-                call.reject("Cannot use selected camera in current session")
-                return
+                DispatchQueue.main.async {
+                    self.updateCameraView(self.currentFrameConfig)
+                }
+                call.resolve()
             }
-            self.captureSession?.addInput(input)
-            self.cameraInput = input
-            self.currentCamera = device.position == .front ? 0 : 1
-            self.captureSession?.commitConfiguration()
-            DispatchQueue.main.async {
-                self.updateCameraView(self.currentFrameConfig)
-            }
-            call.resolve()
         } catch {
             call.reject("Could not switch camera: \(error.localizedDescription)")
         }
