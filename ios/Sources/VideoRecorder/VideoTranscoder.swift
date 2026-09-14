@@ -6,6 +6,7 @@ enum VideoTranscoderError: LocalizedError {
     case cannotReadSource(String)
     case cannotWriteOutput(String)
     case exportFailed(String)
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -17,6 +18,8 @@ enum VideoTranscoderError: LocalizedError {
             return "Cannot write the output video: \(reason)"
         case .exportFailed(let reason):
             return "Failed to transcode: \(reason)"
+        case .cancelled:
+            return "Transcode canceled"
         }
     }
 }
@@ -50,6 +53,33 @@ final class VideoTranscoder {
     private let videoQueue = DispatchQueue(label: "com.capacitorcommunity.videorecorder.transcoder.video")
     private let audioQueue = DispatchQueue(label: "com.capacitorcommunity.videorecorder.transcoder.audio")
 
+    private let stateLock = NSLock()
+    private var reader: AVAssetReader?
+    private var writer: AVAssetWriter?
+    private var isCancelled = false
+
+    /// Stops the export in progress; its completion handler then reports
+    /// `VideoTranscoderError.cancelled`. Safe to call before, during or after an export, and from
+    /// any thread.
+    func cancel() {
+        stateLock.lock()
+        isCancelled = true
+        let reader = self.reader
+        let writer = self.writer
+        stateLock.unlock()
+
+        // Both are safe to call on an already finished session.
+        reader?.cancelReading()
+        writer?.cancelWriting()
+    }
+
+    private var cancelled: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        return isCancelled
+    }
+
     /// Transcodes `asset` and reports progress between 0 and 1 while it runs.
     ///
     /// Both handlers are called on the main queue; `completion` is called exactly once.
@@ -79,6 +109,19 @@ final class VideoTranscoder {
 
         reader.timeRange = configuration.timeRange
         writer.shouldOptimizeForNetworkUse = configuration.optimizeForNetworkUse
+
+        stateLock.lock()
+        let cancelledBeforeStart = isCancelled
+        if !cancelledBeforeStart {
+            self.reader = reader
+            self.writer = writer
+        }
+        stateLock.unlock()
+
+        if cancelledBeforeStart {
+            DispatchQueue.main.async { completion(.failure(VideoTranscoderError.cancelled)) }
+            return
+        }
 
         // Reader: the video composition applies the source orientation and scales to the target size.
         let videoOutput = AVAssetReaderVideoCompositionOutput(
@@ -202,6 +245,18 @@ final class VideoTranscoder {
         }
 
         group.notify(queue: self.videoQueue) {
+            self.clearSession()
+
+            if self.cancelled {
+                // cancelReading()/cancelWriting() also mark the sessions failed, so this has to be
+                // checked before their status.
+                reader.cancelReading()
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: configuration.outputURL)
+                DispatchQueue.main.async { completion(.failure(VideoTranscoderError.cancelled)) }
+                return
+            }
+
             if reader.status == .failed {
                 let reason = reader.error?.localizedDescription ?? "unknown error"
                 writer.cancelWriting()
@@ -231,6 +286,13 @@ final class VideoTranscoder {
         }
     }
 
+    private func clearSession() {
+        stateLock.lock()
+        reader = nil
+        writer = nil
+        stateLock.unlock()
+    }
+
     /// Feeds every sample of `output` into `input`, then leaves `group` exactly once.
     private func pump(
         input: AVAssetWriterInput,
@@ -241,10 +303,17 @@ final class VideoTranscoder {
     ) {
         var finished = false
 
-        input.requestMediaDataWhenReady(on: queue) {
+        input.requestMediaDataWhenReady(on: queue) { [weak self] in
             guard !finished else { return }
 
             while input.isReadyForMoreMediaData {
+                if self?.cancelled == true {
+                    finished = true
+                    input.markAsFinished()
+                    group.leave()
+                    return
+                }
+
                 guard let sampleBuffer = output.copyNextSampleBuffer() else {
                     // Either the track is drained or the reader failed; the caller checks which.
                     finished = true

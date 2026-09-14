@@ -178,6 +178,32 @@ By default the output bitrate is estimated from the output resolution and frame 
 capped at the bitrate of the source, so re-encoding never inflates a file. Pass
 `transcode.videoBitrate` (in bits per second) to set it yourself.
 
+### Cancelling an Edit
+
+Transcoding a long clip takes a while, so `cancelEdit()` stops it. The pending `editVideo()`
+promise rejects with the error code `CANCELED` and the partial output file is deleted.
+
+```typescript
+try {
+  const { file } = await VideoRecorder.editVideo({ path: videoUrl });
+  // ...use the file
+} catch (err) {
+  if (err.code === 'CANCELED') {
+    return; // the user backed out, nothing to report
+  }
+  throw err;
+}
+
+// from a cancel button, or a teardown hook
+await VideoRecorder.cancelEdit();
+```
+
+`cancelEdit()` always resolves: cancelling when no edit is running is not an error, so it is safe
+to call unconditionally when a screen is destroyed.
+
+Only one edit runs at a time. Calling `editVideo()` while another edit is in progress rejects
+immediately with the error code `EDIT_IN_PROGRESS` rather than starting a second transcode.
+
 ### Extracting a Thumbnail
 
 `generateThumbnail()` writes a single frame to a JPEG file.
@@ -237,6 +263,7 @@ The demo app can be found in the Example folder of this repo
 * [`switchCamera(...)`](#switchcamera)
 * [`editVideo(...)`](#editvideo)
 * [`generateThumbnail(...)`](#generatethumbnail)
+* [`cancelEdit()`](#canceledit)
 * [`addListener('onVolumeInput', ...)`](#addlisteneronvolumeinput-)
 * [`addListener('transcodeProgress', ...)`](#addlistenertranscodeprogress-)
 * [Interfaces](#interfaces)
@@ -480,7 +507,11 @@ editVideo(options: VideoEditOptions) => Promise<MediaFileResult>
 ```
 
 Trims and/or transcodes a video file and returns the resulting file.
-Progress is reported through the `transcodeProgress` event.
+Progress is reported through the `transcodeProgress` event, and `cancelEdit()` stops it.
+
+Only one edit runs at a time: calling this while another edit is in progress rejects with
+the error code `EDIT_IN_PROGRESS`.
+
 Not implemented on web.
 
 | Param         | Type                                                          |
@@ -506,6 +537,20 @@ Not implemented on web.
 | **`options`** | <code><a href="#videothumbnailoptions">VideoThumbnailOptions</a></code> |
 
 **Returns:** <code>Promise&lt;<a href="#mediafileresult">MediaFileResult</a>&gt;</code>
+
+--------------------
+
+
+### cancelEdit()
+
+```typescript
+cancelEdit() => Promise<void>
+```
+
+Cancels the `editVideo()` call in progress, if any. The pending `editVideo()` promise
+rejects with the error code `CANCELED` and its partial output is deleted.
+
+Resolves either way: cancelling when nothing is running is not an error.
 
 --------------------
 

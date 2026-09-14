@@ -37,6 +37,16 @@ public class VideoEditorLitr {
     static final String DEFAULT_VIDEO_MIME = "video/avc";
     static final int THUMBNAIL_QUALITY = 80;
 
+    private final Object lock = new Object();
+
+    @Nullable
+    private MediaTransformer mediaTransformer;
+
+    @Nullable
+    private String requestId;
+
+    private boolean cancelled = false;
+
     /**
      * Estimates a sane AVC bitrate for the given output size.
      *
@@ -95,6 +105,7 @@ public class VideoEditorLitr {
         targetAudioFormat.setInteger(MediaFormat.KEY_BIT_RATE, targetAudioBitrate);
 
         MediaTransformer mediaTransformer = new MediaTransformer(context);
+        String requestId = UUID.randomUUID().toString();
 
         TransformationListener listener = new TransformationListener() {
             @Override
@@ -112,7 +123,7 @@ public class VideoEditorLitr {
                 try {
                     videoTransformationListener.onCompleted(id, trackTransformationInfos);
                 } finally {
-                    mediaTransformer.release();
+                    releaseTransformer();
                 }
             }
 
@@ -121,7 +132,7 @@ public class VideoEditorLitr {
                 try {
                     videoTransformationListener.onCancelled(id, trackTransformationInfos);
                 } finally {
-                    mediaTransformer.release();
+                    releaseTransformer();
                 }
             }
 
@@ -134,24 +145,76 @@ public class VideoEditorLitr {
                 try {
                     videoTransformationListener.onError(id, cause, trackTransformationInfos);
                 } finally {
-                    mediaTransformer.release();
+                    releaseTransformer();
                 }
             }
         };
 
-        try {
-            mediaTransformer.transform(
-                UUID.randomUUID().toString(),
-                sourceVideoUri,
-                outFile.getPath(),
-                targetVideoFormat,
-                targetAudioFormat,
-                listener,
-                transformationOptions
-            );
-        } catch (RuntimeException ex) {
-            mediaTransformer.release();
-            throw ex;
+        // Held across transform() so that cancel() either runs before the request exists, and is
+        // caught by the flag below, or after LiTr has registered it and can act on it. transform()
+        // only queues the work, so nothing is blocked for long.
+        synchronized (lock) {
+            if (this.cancelled) {
+                // cancel() landed while the source was still being read.
+                mediaTransformer.release();
+                videoTransformationListener.onCancelled(requestId, null);
+                return;
+            }
+
+            this.mediaTransformer = mediaTransformer;
+            this.requestId = requestId;
+
+            try {
+                mediaTransformer.transform(
+                    requestId,
+                    sourceVideoUri,
+                    outFile.getPath(),
+                    targetVideoFormat,
+                    targetAudioFormat,
+                    listener,
+                    transformationOptions
+                );
+            } catch (RuntimeException ex) {
+                this.mediaTransformer = null;
+                this.requestId = null;
+                mediaTransformer.release();
+                throw ex;
+            }
+        }
+    }
+
+    /**
+     * Stops the transformation in progress. The listener passed to {@link #edit} receives
+     * {@code onCancelled}. Calling this before or after a transformation does nothing beyond
+     * marking this instance as cancelled, so it is safe to call at any point.
+     */
+    public void cancel() {
+        MediaTransformer transformer;
+        String id;
+
+        synchronized (lock) {
+            this.cancelled = true;
+            transformer = this.mediaTransformer;
+            id = this.requestId;
+        }
+
+        if (transformer != null && id != null) {
+            // LiTr reports this through onCancelled, which is where the transformer is released.
+            transformer.cancel(id);
+        }
+    }
+
+    private void releaseTransformer() {
+        MediaTransformer transformer;
+
+        synchronized (lock) {
+            transformer = this.mediaTransformer;
+            this.mediaTransformer = null;
+            this.requestId = null;
+        }
+
+        if (transformer != null) {
+            transformer.release();
         }
     }
 

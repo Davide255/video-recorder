@@ -43,7 +43,11 @@ export interface VideoRecorderPlugin {
   switchCamera(options: { cameraId: string }): Promise<void>;
   /**
    * Trims and/or transcodes a video file and returns the resulting file.
-   * Progress is reported through the `transcodeProgress` event.
+   * Progress is reported through the `transcodeProgress` event, and `cancelEdit()` stops it.
+   *
+   * Only one edit runs at a time: calling this while another edit is in progress rejects with
+   * the error code `EDIT_IN_PROGRESS`.
+   *
    * Not implemented on web.
    */
   editVideo(options: VideoEditOptions): Promise<MediaFileResult>;
@@ -52,6 +56,13 @@ export interface VideoRecorderPlugin {
    * Not implemented on web.
    */
   generateThumbnail(options: VideoThumbnailOptions): Promise<MediaFileResult>;
+  /**
+   * Cancels the `editVideo()` call in progress, if any. The pending `editVideo()` promise
+   * rejects with the error code `CANCELED` and its partial output is deleted.
+   *
+   * Resolves either way: cancelling when nothing is running is not an error.
+   */
+  cancelEdit(): Promise<void>;
   addListener(
     eventName: 'onVolumeInput',
     listenerFunc: (event: { value: number }) => void,

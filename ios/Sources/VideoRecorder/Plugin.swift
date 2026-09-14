@@ -187,6 +187,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
         CAPPluginMethod(name: "switchCamera", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "editVideo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "generateThumbnail", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancelEdit", returnType: CAPPluginReturnPromise),
     ]
 
     var capWebView: WKWebView!
@@ -220,6 +221,35 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
     var currentFrameConfig: FrameConfig = FrameConfig(["id": "default"])
 
     let videoEditor = VideoEditor()
+
+    /// Error code the editVideo() promise is rejected with after cancelEdit().
+    static let editCanceledCode = "CANCELED"
+
+    /// Error code for an editVideo() call made while another one is still running.
+    static let editInProgressCode = "EDIT_IN_PROGRESS"
+
+    /// Guards editInProgress: plugin calls arrive on the plugin's queue, the edit handlers on main.
+    let editStateLock = NSLock()
+    private var editInProgressFlag = false
+
+    /// Reserves the single edit slot, returning false when one is already taken.
+    func beginEdit() -> Bool {
+        editStateLock.lock()
+        defer { editStateLock.unlock() }
+
+        if editInProgressFlag {
+            return false
+        }
+
+        editInProgressFlag = true
+        return true
+    }
+
+    func finishEdit() {
+        editStateLock.lock()
+        editInProgressFlag = false
+        editStateLock.unlock()
+    }
 
     /**
      * Capacitor Plugin load
@@ -1034,6 +1064,13 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 return
             }
 
+            // Transcoding is heavy enough that running two at once helps nobody, and a single
+            // in-flight edit is what makes cancelEdit() unambiguous.
+            guard self.beginEdit() else {
+                call.reject("An edit is already in progress", VideoRecorder.editInProgressCode)
+                return
+            }
+
             self.videoEditor.edit(
                 srcFile: srcFile,
                 outFile: outFile,
@@ -1041,14 +1078,21 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 transcodeSettings: transcodeSettings,
                 completionHandler: { [weak self] url in
                     guard let self = self else { return }
+                    self.finishEdit()
                     call.resolve(["file": self.createMediaFile(url: url)])
                 },
                 progressHandler: { [weak self] progress in
                     self?.notifyListeners("transcodeProgress", data: ["progress": progress])
                 },
-                errorHandler: { error in
+                errorHandler: { [weak self] error in
+                    self?.finishEdit()
                     try? FileManager.default.removeItem(at: outFile)
-                    call.reject(error)
+
+                    if error == VideoTranscoderError.cancelled.localizedDescription {
+                        call.reject(error, VideoRecorder.editCanceledCode)
+                    } else {
+                        call.reject(error)
+                    }
                 }
             )
         } catch TrimSettingsError.invalidArgument(let message) {
@@ -1094,6 +1138,12 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 call.reject(error.localizedDescription)
             }
         }
+    }
+
+    @objc func cancelEdit(_ call: CAPPluginCall) {
+        // The pending editVideo() call is rejected from its error handler.
+        self.videoEditor.cancel()
+        call.resolve()
     }
 
     /**

@@ -9,7 +9,8 @@ import UIKit
     static let defaultAudioBitrate = 128000
     static let thumbnailQuality: CGFloat = 0.8
 
-    private let transcoder = VideoTranscoder()
+    private let lock = NSLock()
+    private var activeTranscoder: VideoTranscoder?
 
     /// For AVC this is a reasonable default.
     /// See https://stackoverflow.com/a/5220554/4288782
@@ -65,11 +66,21 @@ import UIKit
             audioBitrate: calculateTargetAudioBitrate(asset: avAsset)
         )
 
+        // A transcoder per export: a cancelled one stays cancelled, so reusing it would kill the
+        // next edit before it started.
+        let transcoder = VideoTranscoder()
+
+        lock.lock()
+        activeTranscoder = transcoder
+        lock.unlock()
+
         transcoder.export(
             asset: avAsset,
             configuration: configuration,
             progressHandler: progressHandler,
-            completion: { result in
+            completion: { [weak self] result in
+                self?.clearActiveTranscoder(transcoder)
+
                 switch result {
                 case .success(let outputURL):
                     completionHandler(outputURL)
@@ -78,6 +89,25 @@ import UIKit
                 }
             }
         )
+    }
+
+    /// Stops the edit in progress, if any. Its error handler then reports
+    /// `VideoTranscoderError.cancelled`.
+    @objc public func cancel() {
+        lock.lock()
+        let transcoder = activeTranscoder
+        activeTranscoder = nil
+        lock.unlock()
+
+        transcoder?.cancel()
+    }
+
+    private func clearActiveTranscoder(_ transcoder: VideoTranscoder) {
+        lock.lock()
+        if activeTranscoder === transcoder {
+            activeTranscoder = nil
+        }
+        lock.unlock()
     }
 
     @objc public func thumbnail(

@@ -249,4 +249,9 @@ export class VideoRecorderWeb extends WebPlugin implements VideoRecorderPlugin {
 		console.warn('VideoRecorder: No web mock available for generateThumbnail', options);
 		throw this.unimplemented('Not implemented on web.');
 	}
+
+	cancelEdit(): Promise<void> {
+		// Nothing can be running, editVideo() is not implemented here.
+		return Promise.resolve();
+	}
 }

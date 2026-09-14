@@ -69,6 +69,18 @@ public class VideoRecorderPlugin extends Plugin {
     static final String STORAGE = "storage";
 
     private static final String PERMISSION_DENIED_ERROR_STORAGE = "User denied access to storage";
+
+    /** Error code the editVideo() promise is rejected with after cancelEdit(). */
+    private static final String EDIT_CANCELED_CODE = "CANCELED";
+
+    /** Error code for an editVideo() call made while another one is still running. */
+    private static final String EDIT_IN_PROGRESS_CODE = "EDIT_IN_PROGRESS";
+
+    private final Object editLock = new Object();
+    private boolean editInProgress = false;
+
+    @Nullable
+    private VideoEditorLitr activeEditor = null;
     private FancyCamera fancyCamera;
     private PluginCall call;
     private HashMap<String, FrameConfig> previewFrameConfigs;
@@ -441,8 +453,22 @@ public class VideoRecorderPlugin extends Plugin {
 
         Uri inputUri = resolveSourceUri(path);
 
+        // Checked before the slot below is reserved: this method runs again after the permission
+        // request resolves, and must not then collide with its own reservation.
         if (!ensureSourceIsReadable(call, inputUri)) {
             return;
+        }
+
+        // Transcoding is heavy enough that running two at once helps nobody, and a single
+        // in-flight edit is what makes cancelEdit() unambiguous.
+        synchronized (editLock) {
+            if (editInProgress) {
+                call.reject("An edit is already in progress", EDIT_IN_PROGRESS_CODE);
+                return;
+            }
+
+            editInProgress = true;
+            activeEditor = new VideoEditorLitr();
         }
 
         String fileName = "VID_" + timeStamp() + "_";
@@ -483,6 +509,8 @@ public class VideoRecorderPlugin extends Plugin {
                     public void onCompleted(@NonNull String id, @Nullable List<TrackTransformationInfo> infos) {
                         Logger.debug("Transcode completed");
 
+                        finishEdit();
+
                         JSObject ret = new JSObject();
                         ret.put("file", createMediaFile(resultFile));
                         call.resolve(ret);
@@ -492,8 +520,9 @@ public class VideoRecorderPlugin extends Plugin {
                     public void onCancelled(@NonNull String id, @Nullable List<TrackTransformationInfo> infos) {
                         Logger.debug("Transcode cancelled");
 
+                        finishEdit();
                         deleteQuietly(resultFile);
-                        call.reject("Transcode canceled");
+                        call.reject("Transcode canceled", EDIT_CANCELED_CODE);
                     }
 
                     @Override
@@ -501,6 +530,7 @@ public class VideoRecorderPlugin extends Plugin {
                         String message = describe(cause);
                         Logger.error("Transcode error: " + message, cause);
 
+                        finishEdit();
                         deleteQuietly(resultFile);
 
                         // PluginCall only carries an Exception, and LiTr reports a Throwable.
@@ -512,12 +542,55 @@ public class VideoRecorderPlugin extends Plugin {
                     }
                 };
 
-                new VideoEditorLitr().edit(getContext(), inputUri, resultFile, trimSettings, transcodeSettings, videoTransformationListener);
+                VideoEditorLitr editor;
+
+                synchronized (editLock) {
+                    editor = activeEditor;
+                }
+
+                if (editor == null) {
+                    // cancelEdit() ran before the file was even created, so no listener will fire
+                    // and the slot has to be released here.
+                    finishEdit();
+                    deleteQuietly(resultFile);
+                    call.reject("Transcode canceled", EDIT_CANCELED_CODE);
+                    return;
+                }
+
+                editor.edit(getContext(), inputUri, resultFile, trimSettings, transcodeSettings, videoTransformationListener);
             } catch (Exception e) {
+                finishEdit();
                 deleteQuietly(outputFile);
                 call.reject(describe(e), e);
             }
         });
+    }
+
+    @PluginMethod()
+    public void cancelEdit(PluginCall call) {
+        VideoEditorLitr editor;
+
+        synchronized (editLock) {
+            editor = activeEditor;
+            activeEditor = null;
+        }
+
+        if (editor != null) {
+            // The pending editVideo() call is rejected from the listener's onCancelled.
+            editor.cancel();
+        }
+
+        call.resolve();
+    }
+
+    /**
+     * Releases the single edit slot. Safe to call more than once for the same edit.
+     */
+    private void finishEdit() {
+        synchronized (editLock) {
+            editInProgress = false;
+            activeEditor = null;
+        }
     }
 
     @PluginMethod()
