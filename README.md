@@ -2,17 +2,24 @@
 <h3 align="center">VIDEO RECORDER</h3>
 <p align="center"><strong><code>@capacitor-community/video-recorder</code></strong></p>
 <br>
-<p align="center" style="font-size:50px;color:red"><strong>CAPACITOR 7</strong></p><br>
+<p align="center" style="font-size:50px;color:red"><strong>CAPACITOR 8</strong></p><br>
 <br>
 
 capacitor plugin to record video
 
 ## Install
 
-Capacitor v7
+Capacitor v8
 
 ```bash
 npm install @capacitor-community/video-recorder
+npx cap sync
+```
+
+Capacitor v7
+
+```bash
+npm install @capacitor-community/video-recorder@7
 npx cap sync
 ```
 
@@ -29,6 +36,12 @@ Capacitor v5
 npm install @capacitor-community/video-recorder@5
 npx cap sync
 ```
+
+### Requirements
+
+Capacitor 8 sets the floor for this plugin: Android `minSdk` 24 / `compileSdk` 36 with AGP 8.13
+and Java 21, and iOS 15. If you are coming from v7 of this plugin, raise `minSdkVersion` to 24 in
+your app's `variables.gradle` and your iOS deployment target to 15.0 before syncing.
 
 To ensure the Android lib is downloadable when building the app, you can add the following to the repositories section of your project's build.gradle file:
 
