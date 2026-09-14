@@ -1,29 +1,52 @@
 package com.capacitorcommunity.videorecorder;
 
+import android.Manifest;
+import android.content.ContentResolver;
+import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
+import android.os.Build;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.webkit.MimeTypeMap;
 import android.widget.FrameLayout;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.FileUtils;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.Logger;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 
+import com.capacitorcommunity.videorecorder.editor.TranscodeSettings;
+import com.capacitorcommunity.videorecorder.editor.TrimSettings;
+import com.capacitorcommunity.videorecorder.editor.VideoEditorLitr;
+import com.linkedin.android.litr.TransformationListener;
+import com.linkedin.android.litr.analytics.TrackTransformationInfo;
+
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.coordinatorlayout.widget.CoordinatorLayout;
 import co.fitcom.fancycamera.CameraEventListenerUI;
 import co.fitcom.fancycamera.EventType;
@@ -35,9 +58,17 @@ import co.fitcom.fancycamera.VideoEvent;
         name = "VideoRecorder",
         requestCodes = {
             868
+        },
+        permissions = {
+            @Permission(strings = { Manifest.permission.READ_EXTERNAL_STORAGE }, alias = VideoRecorderPlugin.STORAGE)
         }
 )
 public class VideoRecorderPlugin extends Plugin {
+
+    /** Permission alias used when reading a source video the app does not own. */
+    static final String STORAGE = "storage";
+
+    private static final String PERMISSION_DENIED_ERROR_STORAGE = "User denied access to storage";
     private FancyCamera fancyCamera;
     private PluginCall call;
     private HashMap<String, FrameConfig> previewFrameConfigs;
@@ -395,6 +426,229 @@ public class VideoRecorderPlugin extends Plugin {
         JSObject object = new JSObject();
         object.put("value", fancyCamera.getDuration());
         call.resolve(object);
+    }
+
+    @PluginMethod()
+    public void editVideo(PluginCall call) {
+        String path = call.getString("path");
+        JSObject trim = call.getObject("trim", new JSObject());
+        JSObject transcode = call.getObject("transcode", new JSObject());
+
+        if (TextUtils.isEmpty(path)) {
+            call.reject("Input file path is required");
+            return;
+        }
+
+        Uri inputUri = resolveSourceUri(path);
+
+        if (!ensureSourceIsReadable(call, inputUri)) {
+            return;
+        }
+
+        String fileName = "VID_" + timeStamp() + "_";
+        File storageDir = getContext().getCacheDir();
+
+        execute(() -> {
+            File outputFile = null;
+
+            try {
+                outputFile = File.createTempFile(fileName, ".mp4", storageDir);
+                final File resultFile = outputFile;
+
+                TrimSettings trimSettings = new TrimSettings(trim.getInteger("startsAt", 0), trim.getInteger("endsAt", 0));
+
+                TranscodeSettings transcodeSettings = new TranscodeSettings(
+                    transcode.getInteger("height", 0),
+                    transcode.getInteger("width", 0),
+                    transcode.getBoolean("keepAspectRatio", true),
+                    transcode.getInteger("fps", 30),
+                    transcode.getInteger("videoBitrate", 0)
+                );
+
+                TransformationListener videoTransformationListener = new TransformationListener() {
+                    @Override
+                    public void onStarted(@NonNull String id) {
+                        Logger.debug("Transcode started");
+                    }
+
+                    @Override
+                    public void onProgress(@NonNull String id, float progress) {
+                        JSObject ret = new JSObject();
+                        ret.put("progress", progress);
+
+                        notifyListeners("transcodeProgress", ret);
+                    }
+
+                    @Override
+                    public void onCompleted(@NonNull String id, @Nullable List<TrackTransformationInfo> infos) {
+                        Logger.debug("Transcode completed");
+
+                        JSObject ret = new JSObject();
+                        ret.put("file", createMediaFile(resultFile));
+                        call.resolve(ret);
+                    }
+
+                    @Override
+                    public void onCancelled(@NonNull String id, @Nullable List<TrackTransformationInfo> infos) {
+                        Logger.debug("Transcode cancelled");
+
+                        deleteQuietly(resultFile);
+                        call.reject("Transcode canceled");
+                    }
+
+                    @Override
+                    public void onError(@NonNull String id, @Nullable Throwable cause, @Nullable List<TrackTransformationInfo> infos) {
+                        String message = cause != null ? cause.getMessage() : "unknown error";
+                        Logger.error("Transcode error: " + message, cause);
+
+                        deleteQuietly(resultFile);
+                        call.reject("Transcode failed: " + message, cause);
+                    }
+                };
+
+                new VideoEditorLitr().edit(getContext(), inputUri, resultFile, trimSettings, transcodeSettings, videoTransformationListener);
+            } catch (Exception e) {
+                deleteQuietly(outputFile);
+                call.reject(e.getMessage(), e);
+            }
+        });
+    }
+
+    @PluginMethod()
+    public void generateThumbnail(PluginCall call) {
+        String path = call.getString("path");
+        int atMs = call.getInt("at", 0);
+        int width = call.getInt("width", 0);
+        int height = call.getInt("height", 0);
+
+        if (TextUtils.isEmpty(path)) {
+            call.reject("Input file path is required");
+            return;
+        }
+
+        Uri inputUri = resolveSourceUri(path);
+
+        if (!ensureSourceIsReadable(call, inputUri)) {
+            return;
+        }
+
+        String fileName = "TH_" + timeStamp() + "_";
+        File storageDir = getContext().getCacheDir();
+
+        execute(() -> {
+            File outputFile = null;
+
+            try {
+                outputFile = File.createTempFile(fileName, ".jpg", storageDir);
+
+                new VideoEditorLitr().thumbnail(getContext(), inputUri, outputFile, atMs, width, height);
+
+                JSObject ret = new JSObject();
+                ret.put("file", createMediaFile(outputFile));
+                call.resolve(ret);
+            } catch (Exception e) {
+                deleteQuietly(outputFile);
+                call.reject(e.getMessage(), e);
+            }
+        });
+    }
+
+    private static String timeStamp() {
+        return new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ENGLISH).format(new Date());
+    }
+
+    /**
+     * Accepts a {@code file://} url, a {@code content://} uri or a bare filesystem path.
+     */
+    private static Uri resolveSourceUri(@NonNull String path) {
+        Uri uri = Uri.parse(path);
+
+        if (uri.getScheme() == null) {
+            return Uri.fromFile(new File(path));
+        }
+
+        return uri;
+    }
+
+    private static void deleteQuietly(@Nullable File file) {
+        if (file != null && file.exists() && !file.delete()) {
+            Logger.debug("Could not delete " + file.getAbsolutePath());
+        }
+    }
+
+    /**
+     * Checks that the source can be read, requesting the legacy storage permission only when the
+     * file really is out of reach. Files the app owns (its own recordings included) never trigger a
+     * permission prompt, and {@code content://} uris are covered by the grant that produced them.
+     *
+     * @return true when the caller can proceed, false when the call was rejected or is waiting on a
+     *         permission request
+     */
+    private boolean ensureSourceIsReadable(PluginCall call, Uri uri) {
+        if (!ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
+            return true;
+        }
+
+        String filePath = uri.getPath();
+        File file = filePath != null ? new File(filePath) : null;
+
+        if (file != null && file.canRead()) {
+            return true;
+        }
+
+        // READ_EXTERNAL_STORAGE no longer grants anything from Android 13 on.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            requestPermissionForAlias(STORAGE, call, "storagePermissionsCallback");
+            return false;
+        }
+
+        call.reject("Cannot read input file: " + (file != null ? file.getAbsolutePath() : uri.toString()));
+        return false;
+    }
+
+    @PermissionCallback
+    private void storagePermissionsCallback(PluginCall call) {
+        if (getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            Logger.debug(getLogTag(), "User denied storage permission: " + getPermissionState(STORAGE).toString());
+            call.reject(PERMISSION_DENIED_ERROR_STORAGE);
+            return;
+        }
+
+        switch (call.getMethodName()) {
+            case "editVideo":
+                editVideo(call);
+                break;
+            case "generateThumbnail":
+                generateThumbnail(call);
+                break;
+            default:
+                call.reject(PERMISSION_DENIED_ERROR_STORAGE);
+                break;
+        }
+    }
+
+    /**
+     * Builds the JS representation of a file produced by the editor.
+     */
+    private JSObject createMediaFile(File file) {
+        Context context = getContext();
+        Uri uri = Uri.fromFile(file);
+        String mimeType;
+
+        if (ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            mimeType = context.getContentResolver().getType(uri);
+        } else {
+            mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(uri.toString()));
+        }
+
+        JSObject ret = new JSObject();
+
+        ret.put("name", file.getName());
+        ret.put("path", uri.toString());
+        ret.put("type", mimeType);
+        ret.put("size", file.length());
+
+        return ret;
     }
 
     @PluginMethod()

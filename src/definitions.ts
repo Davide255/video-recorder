@@ -162,6 +162,13 @@ export interface VideoEditTranscodeOptions {
    * @default 30
    */
   fps?: number;
+  /**
+   * Target bitrate of the output video, in bits per second. When omitted (or `0`) the
+   * plugin estimates one from the output resolution and frame rate
+   * (`0.07 * 2 * width * height * fps`), capped at the bitrate of the source video.
+   * @default 0
+   */
+  videoBitrate?: number;
 }
 
 export interface VideoEditOptions {

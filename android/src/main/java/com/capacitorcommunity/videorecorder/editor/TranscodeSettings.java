@@ -9,14 +9,20 @@ public class TranscodeSettings {
     private int width = 0;
     private boolean keepAspectRatio = true;
     private int fps = 30;
+    private int videoBitrate = 0;
 
     public TranscodeSettings() {}
 
     public TranscodeSettings(int height, int width, boolean keepAspectRatio, int fps) {
+        this(height, width, keepAspectRatio, fps, 0);
+    }
+
+    public TranscodeSettings(int height, int width, boolean keepAspectRatio, int fps, int videoBitrate) {
         setHeight(height);
         setWidth(width);
         setKeepAspectRatio(keepAspectRatio);
         setFps(fps);
+        setVideoBitrate(videoBitrate);
     }
 
     public int getHeight() {
@@ -61,5 +67,20 @@ public class TranscodeSettings {
         }
 
         this.fps = fps;
+    }
+
+    /**
+     * @return the requested output bitrate in bits/sec, or 0 to let the plugin estimate one
+     */
+    public int getVideoBitrate() {
+        return videoBitrate;
+    }
+
+    public void setVideoBitrate(int videoBitrate) {
+        if (videoBitrate < 0) {
+            throw new IllegalArgumentException("Parameter videoBitrate cannot be negative");
+        }
+
+        this.videoBitrate = videoBitrate;
     }
 }
