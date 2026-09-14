@@ -1,6 +1,14 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { VideoRecorderPlugin, VideoRecorderOptions, VideoRecorderPreviewFrame, VideoRecorderCameraInfo } from './definitions';
+import type {
+	VideoRecorderPlugin,
+	VideoRecorderOptions,
+	VideoRecorderPreviewFrame,
+	VideoRecorderCameraInfo,
+	VideoEditOptions,
+	VideoThumbnailOptions,
+	MediaFileResult,
+} from './definitions';
 
 class DropShadow {
 	opacity?: number;
@@ -229,6 +237,21 @@ export class VideoRecorderWeb extends WebPlugin implements VideoRecorderPlugin {
 
 	switchCamera(_options: { cameraId: string }): Promise<void> {
 		console.warn('VideoRecorder: No web mock available for switchCamera');
+		return Promise.resolve();
+	}
+
+	editVideo(options: VideoEditOptions): Promise<MediaFileResult> {
+		console.warn('VideoRecorder: No web mock available for editVideo', options);
+		throw this.unimplemented('Not implemented on web.');
+	}
+
+	generateThumbnail(options: VideoThumbnailOptions): Promise<MediaFileResult> {
+		console.warn('VideoRecorder: No web mock available for generateThumbnail', options);
+		throw this.unimplemented('Not implemented on web.');
+	}
+
+	cancelEdit(): Promise<void> {
+		// Nothing can be running, editVideo() is not implemented here.
 		return Promise.resolve();
 	}
 }

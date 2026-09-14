@@ -2,17 +2,24 @@
 <h3 align="center">VIDEO RECORDER</h3>
 <p align="center"><strong><code>@capacitor-community/video-recorder</code></strong></p>
 <br>
-<p align="center" style="font-size:50px;color:red"><strong>CAPACITOR 7</strong></p><br>
+<p align="center" style="font-size:50px;color:red"><strong>CAPACITOR 8</strong></p><br>
 <br>
 
 capacitor plugin to record video
 
 ## Install
 
-Capacitor v7
+Capacitor v8
 
 ```bash
 npm install @capacitor-community/video-recorder
+npx cap sync
+```
+
+Capacitor v7
+
+```bash
+npm install @capacitor-community/video-recorder@7
 npx cap sync
 ```
 
@@ -29,6 +36,12 @@ Capacitor v5
 npm install @capacitor-community/video-recorder@5
 npx cap sync
 ```
+
+### Requirements
+
+Capacitor 8 sets the floor for this plugin: Android `minSdk` 24 / `compileSdk` 36 with AGP 8.13
+and Java 21, and iOS 15. If you are coming from v7 of this plugin, raise `minSdkVersion` to 24 in
+your app's `variables.gradle` and your iOS deployment target to 15.0 before syncing.
 
 To ensure the Android lib is downloadable when building the app, you can add the following to the repositories section of your project's build.gradle file:
 
@@ -121,6 +134,105 @@ Used to disconnect from the capture device and remove any native UI layers that 
 VideoRecorder.destroy();
 ```
 
+### Editing a Recording
+
+`editVideo()` trims and/or transcodes a video file and resolves with the resulting file. It accepts
+the `videoUrl` returned by `stopRecording()` directly, so trimming a fresh recording needs no
+intermediate step.
+
+```typescript
+const { videoUrl } = await VideoRecorder.stopRecording();
+
+const { file } = await VideoRecorder.editVideo({
+  path: videoUrl,
+  trim: {
+    startsAt: 2000, // keep from 00:02...
+    endsAt: 12000,  // ...to 00:12
+  },
+  transcode: {
+    width: 720,
+    height: 720,
+    keepAspectRatio: true, // width/height become a bound, not an exact size
+    fps: 30,
+  },
+});
+
+console.log(file.path, file.size, file.type);
+```
+
+Every option is optional except `path`. With no `trim` the whole video is kept; with no `transcode`
+the video is scaled down to fit within 1280px on its longest side at 30fps.
+
+Transcoding is slow enough to be worth reporting on, so listen for `transcodeProgress`:
+
+```typescript
+const handle = await VideoRecorder.addListener('transcodeProgress', ({ progress }) => {
+  console.log(`${Math.round(progress * 100)}%`);
+});
+
+// ...when you are done
+await handle.remove();
+```
+
+By default the output bitrate is estimated from the output resolution and frame rate and then
+capped at the bitrate of the source, so re-encoding never inflates a file. Pass
+`transcode.videoBitrate` (in bits per second) to set it yourself.
+
+### Cancelling an Edit
+
+Transcoding a long clip takes a while, so `cancelEdit()` stops it. The pending `editVideo()`
+promise rejects with the error code `CANCELED` and the partial output file is deleted.
+
+```typescript
+try {
+  const { file } = await VideoRecorder.editVideo({ path: videoUrl });
+  // ...use the file
+} catch (err) {
+  if (err.code === 'CANCELED') {
+    return; // the user backed out, nothing to report
+  }
+  throw err;
+}
+
+// from a cancel button, or a teardown hook
+await VideoRecorder.cancelEdit();
+```
+
+`cancelEdit()` always resolves: cancelling when no edit is running is not an error, so it is safe
+to call unconditionally when a screen is destroyed.
+
+Only one edit runs at a time. Calling `editVideo()` while another edit is in progress rejects
+immediately with the error code `EDIT_IN_PROGRESS` rather than starting a second transcode.
+
+### Extracting a Thumbnail
+
+`generateThumbnail()` writes a single frame to a JPEG file.
+
+```typescript
+const { file } = await VideoRecorder.generateThumbnail({
+  path: videoUrl,
+  at: 1500,   // milliseconds into the video
+  width: 320, // scaled to fit, aspect ratio preserved
+  height: 320,
+});
+
+imgElement.src = Capacitor.convertFileSrc(file.path);
+```
+
+`width` and `height` bound the result while preserving the aspect ratio; give only one of them to
+constrain that dimension alone, or neither to get the frame at its native size.
+
+### Notes on Editing
+
+- Both methods write to the app's cache directory. The OS may clear it, so move anything you want
+  to keep (with `@capacitor/filesystem`, for instance) rather than storing the returned path.
+- Neither method is implemented on web; both reject with `unimplemented`.
+- On Android, `path` may also be a `content://` uri, such as one coming from a file picker.
+- Reading a file the app does not own can require the legacy storage permission on Android 12 and
+  below. The plugin only asks for it when the file really is unreadable, and your app must declare
+  `READ_EXTERNAL_STORAGE` in its own manifest for that request to succeed. Editing the app's own
+  recordings never prompts.
+
 ### Demo App
 
 The demo app can be found in the Example folder of this repo
@@ -149,7 +261,11 @@ The demo app can be found in the Example folder of this repo
 * [`disableMicrophone()`](#disablemicrophone)
 * [`getAvailableCameras()`](#getavailablecameras)
 * [`switchCamera(...)`](#switchcamera)
+* [`editVideo(...)`](#editvideo)
+* [`generateThumbnail(...)`](#generatethumbnail)
+* [`cancelEdit()`](#canceledit)
 * [`addListener('onVolumeInput', ...)`](#addlisteneronvolumeinput-)
+* [`addListener('transcodeProgress', ...)`](#addlistenertranscodeprogress-)
 * [Interfaces](#interfaces)
 * [Enums](#enums)
 
@@ -384,6 +500,61 @@ iOS only.
 --------------------
 
 
+### editVideo(...)
+
+```typescript
+editVideo(options: VideoEditOptions) => Promise<MediaFileResult>
+```
+
+Trims and/or transcodes a video file and returns the resulting file.
+Progress is reported through the `transcodeProgress` event, and `cancelEdit()` stops it.
+
+Only one edit runs at a time: calling this while another edit is in progress rejects with
+the error code `EDIT_IN_PROGRESS`.
+
+Not implemented on web.
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code><a href="#videoeditoptions">VideoEditOptions</a></code> |
+
+**Returns:** <code>Promise&lt;<a href="#mediafileresult">MediaFileResult</a>&gt;</code>
+
+--------------------
+
+
+### generateThumbnail(...)
+
+```typescript
+generateThumbnail(options: VideoThumbnailOptions) => Promise<MediaFileResult>
+```
+
+Extracts a frame of a video file as a JPEG image.
+Not implemented on web.
+
+| Param         | Type                                                                    |
+| ------------- | ----------------------------------------------------------------------- |
+| **`options`** | <code><a href="#videothumbnailoptions">VideoThumbnailOptions</a></code> |
+
+**Returns:** <code>Promise&lt;<a href="#mediafileresult">MediaFileResult</a>&gt;</code>
+
+--------------------
+
+
+### cancelEdit()
+
+```typescript
+cancelEdit() => Promise<void>
+```
+
+Cancels the `editVideo()` call in progress, if any. The pending `editVideo()` promise
+rejects with the error code `CANCELED` and its partial output is deleted.
+
+Resolves either way: cancelling when nothing is running is not an error.
+
+--------------------
+
+
 ### addListener('onVolumeInput', ...)
 
 ```typescript
@@ -394,6 +565,24 @@ addListener(eventName: 'onVolumeInput', listenerFunc: (event: { value: number; }
 | ------------------ | --------------------------------------------------- |
 | **`eventName`**    | <code>'onVolumeInput'</code>                        |
 | **`listenerFunc`** | <code>(event: { value: number; }) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### addListener('transcodeProgress', ...)
+
+```typescript
+addListener(eventName: 'transcodeProgress', listenerFunc: (info: TranscodeProgressInfo) => void) => Promise<PluginListenerHandle>
+```
+
+Fired while `editVideo()` is transcoding.
+
+| Param              | Type                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------ |
+| **`eventName`**    | <code>'transcodeProgress'</code>                                                           |
+| **`listenerFunc`** | <code>(info: <a href="#transcodeprogressinfo">TranscodeProgressInfo</a>) =&gt; void</code> |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 
@@ -438,11 +627,73 @@ addListener(eventName: 'onVolumeInput', listenerFunc: (event: { value: number; }
 | **`type`**     | <code>'wide' \| 'ultrawide' \| 'telephoto'</code> |                                                  |
 
 
+#### MediaFileResult
+
+| Prop       | Type                                            |
+| ---------- | ----------------------------------------------- |
+| **`file`** | <code><a href="#mediafile">MediaFile</a></code> |
+
+
+#### MediaFile
+
+| Prop       | Type                | Description                                     |
+| ---------- | ------------------- | ----------------------------------------------- |
+| **`name`** | <code>string</code> | The name of the file, without path information. |
+| **`path`** | <code>string</code> | The full path of the file, including the name.  |
+| **`type`** | <code>string</code> | The file's mime type.                           |
+| **`size`** | <code>number</code> | The size of the file, in bytes.                 |
+
+
+#### VideoEditOptions
+
+| Prop            | Type                                                                            | Description                                                                                                                                                           |
+| --------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`path`**      | <code>string</code>                                                             | Path of the source video. Accepts a `file://` url (such as the `videoUrl` returned by `stopRecording()`), a plain filesystem path or, on Android, a `content://` uri. |
+| **`trim`**      | <code><a href="#videoedittrimoptions">VideoEditTrimOptions</a></code>           |                                                                                                                                                                       |
+| **`transcode`** | <code><a href="#videoedittranscodeoptions">VideoEditTranscodeOptions</a></code> |                                                                                                                                                                       |
+
+
+#### VideoEditTrimOptions
+
+| Prop           | Type                | Description                                                                                                                   | Default        |
+| -------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| **`startsAt`** | <code>number</code> | Start of the output video, in milliseconds from the start of the source.                                                      | <code>0</code> |
+| **`endsAt`**   | <code>number</code> | End of the output video, in milliseconds from the start of the source. `0` (the default) means "until the end of the source". | <code>0</code> |
+
+
+#### VideoEditTranscodeOptions
+
+| Prop                  | Type                 | Description                                                                                                                                                                                                                      | Default           |
+| --------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| **`height`**          | <code>number</code>  | Target height in pixels. `0` lets the plugin pick it.                                                                                                                                                                            | <code>0</code>    |
+| **`width`**           | <code>number</code>  | Target width in pixels. `0` lets the plugin pick it.                                                                                                                                                                             | <code>0</code>    |
+| **`keepAspectRatio`** | <code>boolean</code> | Keep the aspect ratio of the source video. When `true`, `width`/`height` are treated as a maximum bound instead of an exact size.                                                                                                | <code>true</code> |
+| **`fps`**             | <code>number</code>  | Frames per second of the output video.                                                                                                                                                                                           | <code>30</code>   |
+| **`videoBitrate`**    | <code>number</code>  | Target bitrate of the output video, in bits per second. When omitted (or `0`) the plugin estimates one from the output resolution and frame rate (`0.07 * 2 * width * height * fps`), capped at the bitrate of the source video. | <code>0</code>    |
+
+
+#### VideoThumbnailOptions
+
+| Prop         | Type                | Description                                                                   | Default        |
+| ------------ | ------------------- | ----------------------------------------------------------------------------- | -------------- |
+| **`path`**   | <code>string</code> | Path of the source video. Same formats as `editVideo()`.                      |                |
+| **`at`**     | <code>number</code> | Position of the extracted frame, in milliseconds from the start of the video. | <code>0</code> |
+| **`width`**  | <code>number</code> | Target width in pixels. `0` keeps the source width.                           | <code>0</code> |
+| **`height`** | <code>number</code> | Target height in pixels. `0` keeps the source height.                         | <code>0</code> |
+
+
 #### PluginListenerHandle
 
 | Prop         | Type                                      |
 | ------------ | ----------------------------------------- |
 | **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
+
+
+#### TranscodeProgressInfo
+
+| Prop           | Type                | Description                                |
+| -------------- | ------------------- | ------------------------------------------ |
+| **`progress`** | <code>number</code> | Transcoding progress, between `0` and `1`. |
 
 
 ### Enums
@@ -474,7 +725,11 @@ addListener(eventName: 'onVolumeInput', listenerFunc: (event: { value: number; }
 
 The Android code is using `triniwiz/FancyCamera` v1.2.4 (<https://github.com/triniwiz/fancycamera>)
 
-The iOS code is implemented using AVFoundation
+Video editing on Android is using LinkedIn's `LiTr` v1.5.7 (<https://github.com/linkedin/LiTr>), a
+hardware accelerated `MediaCodec` transcoder resolved from Maven Central. There is no FFmpeg
+dependency, so nothing here changes your app's licensing or binary size beyond ~500KB.
+
+The iOS code is implemented using AVFoundation, video editing included.
 
 ## Contributors ✨
 
