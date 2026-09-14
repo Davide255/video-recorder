@@ -41,9 +41,27 @@ export interface VideoRecorderPlugin {
    * iOS only.
    */
   switchCamera(options: { cameraId: string }): Promise<void>;
+  /**
+   * Trims and/or transcodes a video file and returns the resulting file.
+   * Progress is reported through the `transcodeProgress` event.
+   * Not implemented on web.
+   */
+  editVideo(options: VideoEditOptions): Promise<MediaFileResult>;
+  /**
+   * Extracts a frame of a video file as a JPEG image.
+   * Not implemented on web.
+   */
+  generateThumbnail(options: VideoThumbnailOptions): Promise<MediaFileResult>;
   addListener(
     eventName: 'onVolumeInput',
     listenerFunc: (event: { value: number }) => void,
+  ): Promise<PluginListenerHandle>;
+  /**
+   * Fired while `editVideo()` is transcoding.
+   */
+  addListener(
+    eventName: 'transcodeProgress',
+    listenerFunc: (info: TranscodeProgressInfo) => void,
   ): Promise<PluginListenerHandle>;
 }
 
@@ -106,4 +124,105 @@ export enum VideoRecorderQuality {
   HIGHEST = 4,
   LOWEST = 5,
   QVGA = 6,
+}
+
+export interface VideoEditTrimOptions {
+  /**
+   * Start of the output video, in milliseconds from the start of the source.
+   * @default 0
+   */
+  startsAt?: number;
+  /**
+   * End of the output video, in milliseconds from the start of the source.
+   * `0` (the default) means "until the end of the source".
+   * @default 0
+   */
+  endsAt?: number;
+}
+
+export interface VideoEditTranscodeOptions {
+  /**
+   * Target height in pixels. `0` lets the plugin pick it.
+   * @default 0
+   */
+  height?: number;
+  /**
+   * Target width in pixels. `0` lets the plugin pick it.
+   * @default 0
+   */
+  width?: number;
+  /**
+   * Keep the aspect ratio of the source video. When `true`, `width`/`height`
+   * are treated as a maximum bound instead of an exact size.
+   * @default true
+   */
+  keepAspectRatio?: boolean;
+  /**
+   * Frames per second of the output video.
+   * @default 30
+   */
+  fps?: number;
+}
+
+export interface VideoEditOptions {
+  /**
+   * Path of the source video. Accepts a `file://` url (such as the `videoUrl`
+   * returned by `stopRecording()`), a plain filesystem path or, on Android, a
+   * `content://` uri.
+   */
+  path: string;
+  trim?: VideoEditTrimOptions;
+  transcode?: VideoEditTranscodeOptions;
+}
+
+export interface VideoThumbnailOptions {
+  /**
+   * Path of the source video. Same formats as `editVideo()`.
+   */
+  path: string;
+  /**
+   * Position of the extracted frame, in milliseconds from the start of the video.
+   * @default 0
+   */
+  at?: number;
+  /**
+   * Target width in pixels. `0` keeps the source width.
+   * @default 0
+   */
+  width?: number;
+  /**
+   * Target height in pixels. `0` keeps the source height.
+   * @default 0
+   */
+  height?: number;
+}
+
+export interface MediaFileResult {
+  file: MediaFile;
+}
+
+export interface MediaFile {
+  /**
+   * The name of the file, without path information.
+   */
+  name: string;
+  /**
+   * The full path of the file, including the name.
+   */
+  path: string;
+  /**
+   * The file's mime type.
+   */
+  type: string;
+  /**
+   * The size of the file, in bytes.
+   */
+  size: number;
+}
+
+export interface TranscodeProgressInfo {
+  /**
+   * Transcoding progress, between `0` and `1`.
+   */
+  progress: number;
 }
