@@ -160,7 +160,7 @@ public func randomFileName() -> String {
 }
 
 @objc(VideoRecorder)
-public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAPBridgedPlugin {
+public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, CAPBridgedPlugin {
     public let identifier = "VideoRecorder"
     public let jsName = "VideoRecorder"
     public let pluginMethods: [CAPPluginMethod] = [
@@ -194,8 +194,12 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
     var videoOutput: AVCaptureMovieFileOutput?
     var durationTimer: Timer?
 
-    var audioLevelTimer: Timer?
-    var audioRecorder: AVAudioRecorder?
+    // Audio metering is derived from the capture session itself (see audioDataOutput)
+    // instead of a separate AVAudioRecorder, so a second audio client never re-activates
+    // the audio session and interrupts other apps' audio (e.g. background music).
+    var audioDataOutput: AVCaptureAudioDataOutput?
+    let audioMeterQueue = DispatchQueue(label: "video-recorder.audio-meter")
+    private var lastMeterEmit: CFAbsoluteTime = 0
 
     var cameraInput: AVCaptureDeviceInput?
 
@@ -361,11 +365,47 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
         }
     }
 
-    @objc func levelTimerCallback(_ timer: Timer?) {
-        self.audioRecorder?.updateMeters()
-        // let peakDecebels: Float = (self.audioRecorder?.peakPower(forChannel: 1))!
-        let averagePower: Float = (self.audioRecorder?.averagePower(forChannel: 1))!
-        self.notifyListeners("onVolumeInput", data: ["value":averagePower])
+    /**
+     * Configures the shared audio session so the camera/mic never interrupt other
+     * apps' audio. `.mixWithOthers` is the key option: with it set, activating our
+     * (play-and-record) session does not stop background music. `.videoRecording`
+     * mode is the camera-appropriate mode and plays nicely with mixing.
+     *
+     * Note: with mixing enabled the microphone will also pick up any audio coming
+     * out of the speaker — that is the inherent trade-off of keeping other audio
+     * playing while recording.
+     */
+    private func configureAudioSessionForMixing() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, mode: .videoRecording, options: [
+                .mixWithOthers,
+                .defaultToSpeaker,
+                .allowBluetoothA2DP,
+                .allowAirPlay
+            ])
+            try session.setActive(true)
+        } catch {
+            print("Failed to configure audio session for mixing: \(error)")
+        }
+    }
+
+    /**
+     * AVCaptureAudioDataOutputSampleBufferDelegate
+     * Reads the mic level straight from the capture session's audio connection so we
+     * don't need a second audio client just for metering.
+     */
+    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Throttle to ~10 Hz to match the previous timer-based cadence.
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - self.lastMeterEmit < 0.1 { return }
+        self.lastMeterEmit = now
+
+        var averagePower: Float = -160
+        for channel in connection.audioChannels {
+            averagePower = max(averagePower, channel.averagePowerLevel)
+        }
+        self.notifyListeners("onVolumeInput", data: ["value": averagePower])
     }
 
 
@@ -439,6 +479,13 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                         self.videoOutput?.movieFragmentInterval = CMTime.invalid
                         self.captureSession!.addOutput(self.videoOutput!)
 
+                        // Add Audio Data Output purely for level metering (onVolumeInput),
+                        // sharing the capture session's single audio client.
+                        self.audioDataOutput = AVCaptureAudioDataOutput()
+                        if self.captureSession!.canAddOutput(self.audioDataOutput!) {
+                            self.captureSession!.addOutput(self.audioDataOutput!)
+                        }
+
                         // Set Video quality
                         switch(self.quality){
                         case 1:
@@ -470,30 +517,15 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                         // Commit configurations
                         self.captureSession?.commitConfiguration()
 
+                        // Configure the audio session AFTER the capture session is fully
+                        // committed. Because `automaticallyConfiguresApplicationAudioSession`
+                        // is false, nothing overwrites these options, so `.mixWithOthers`
+                        // actually sticks and other apps' audio (e.g. background music)
+                        // keeps playing while the camera previews and records.
+                        self.configureAudioSessionForMixing()
 
-                        do {
-                            try AVAudioSession.sharedInstance().setCategory(AVAudioSession.Category.playAndRecord, mode: AVAudioSession.Mode.default, options: [
-                                .mixWithOthers,
-                                .defaultToSpeaker,
-                                .allowBluetoothA2DP,
-                                .allowAirPlay
-                            ])
-                        } catch {
-                            print("Failed to set audio session category.")
-                        }
-                        try? AVAudioSession.sharedInstance().setActive(true)
-                        let settings = [
-                            AVSampleRateKey : 44100.0,
-                            AVFormatIDKey : kAudioFormatAppleLossless,
-                            AVNumberOfChannelsKey : 2,
-                            AVEncoderAudioQualityKey : AVAudioQuality.max.rawValue
-                            ] as [String : Any]
-                        self.audioRecorder = try AVAudioRecorder(url: URL(fileURLWithPath: "/dev/null"), settings: settings)
-                        self.audioRecorder?.isMeteringEnabled = true
-                        self.audioRecorder?.prepareToRecord()
-                        self.audioRecorder?.record()
-                        self.audioLevelTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(self.levelTimerCallback(_:)), userInfo: nil, repeats: true)
-                        self.audioRecorder?.updateMeters()
+                        // Route metering samples to our delegate on a dedicated queue.
+                        self.audioDataOutput?.setSampleBufferDelegate(self, queue: self.audioMeterQueue)
 
                         // Start running sessions
                         self.captureSession!.startRunning()
@@ -537,17 +569,14 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 if (self.captureSession!.isRunning) {
                     self.captureSession!.stopRunning()
                 }
-                if (self.audioRecorder != nil && self.audioRecorder!.isRecording) {
-                    self.audioRecorder!.stop()
-                }
+                self.audioDataOutput?.setSampleBufferDelegate(nil, queue: nil)
                 self.cameraView?.removePreviewLayer()
                 self.captureVideoPreviewLayer = nil
                 self.cameraView?.removeFromSuperview()
                 self.videoOutput = nil
+                self.audioDataOutput = nil
                 self.cameraView = nil
                 self.captureSession = nil
-                self.audioRecorder = nil
-                self.audioLevelTimer?.invalidate()
                 self.currentCamera = 0
                 self.frontCamera = nil
                 self.backCamera = nil
@@ -557,6 +586,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                 self.pendingCameraSwitch = nil
                 self.shouldStopAfterSwitch = false
                 self.notifyListeners("onVolumeInput", data: ["value":0])
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
             call.resolve()
         }
@@ -795,6 +825,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
                     if let audioConnection = self.videoOutput?.connection(with: .audio) {
                         audioConnection.isEnabled = self.isMicrophoneEnabled
                     }
+                    // Re-assert mixing in case starting the recording nudged the audio session,
+                    // so background music keeps playing throughout the recording.
+                    self.configureAudioSessionForMixing()
                     self.videoOutput?.startRecording(to: fileUrl, recordingDelegate: self)
                     call.resolve()
                 }
