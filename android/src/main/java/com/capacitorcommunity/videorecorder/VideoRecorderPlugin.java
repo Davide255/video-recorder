@@ -498,18 +498,24 @@ public class VideoRecorderPlugin extends Plugin {
 
                     @Override
                     public void onError(@NonNull String id, @Nullable Throwable cause, @Nullable List<TrackTransformationInfo> infos) {
-                        String message = cause != null ? cause.getMessage() : "unknown error";
+                        String message = describe(cause);
                         Logger.error("Transcode error: " + message, cause);
 
                         deleteQuietly(resultFile);
-                        call.reject("Transcode failed: " + message, cause);
+
+                        // PluginCall only carries an Exception, and LiTr reports a Throwable.
+                        if (cause instanceof Exception) {
+                            call.reject("Transcode failed: " + message, (Exception) cause);
+                        } else {
+                            call.reject("Transcode failed: " + message);
+                        }
                     }
                 };
 
                 new VideoEditorLitr().edit(getContext(), inputUri, resultFile, trimSettings, transcodeSettings, videoTransformationListener);
             } catch (Exception e) {
                 deleteQuietly(outputFile);
-                call.reject(e.getMessage(), e);
+                call.reject(describe(e), e);
             }
         });
     }
@@ -548,9 +554,19 @@ public class VideoRecorderPlugin extends Plugin {
                 call.resolve(ret);
             } catch (Exception e) {
                 deleteQuietly(outputFile);
-                call.reject(e.getMessage(), e);
+                call.reject(describe(e), e);
             }
         });
+    }
+
+    private static String describe(@Nullable Throwable throwable) {
+        if (throwable == null) {
+            return "unknown error";
+        }
+
+        String message = throwable.getMessage();
+
+        return message != null && !message.isEmpty() ? message : throwable.getClass().getSimpleName();
     }
 
     private static String timeStamp() {

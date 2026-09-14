@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Capacitor
+import UniformTypeIdentifiers
 
 extension UIColor {
     convenience init(fromHex hex: String) {
@@ -184,6 +185,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
         CAPPluginMethod(name: "disableMicrophone", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getAvailableCameras", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "switchCamera", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "editVideo", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "generateThumbnail", returnType: CAPPluginReturnPromise),
     ]
 
     var capWebView: WKWebView!
@@ -215,6 +218,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
 
     var previewFrameConfigs: [FrameConfig] = []
     var currentFrameConfig: FrameConfig = FrameConfig(["id": "default"])
+
+    let videoEditor = VideoEditor()
 
     /**
      * Capacitor Plugin load
@@ -993,5 +998,166 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, CAP
             }
             device.unlockForConfiguration()
         } catch {}
+    }
+
+    /**
+     * Video editing, ported from https://github.com/dragermrb/capacitor-plugin-video-editor
+     */
+    @objc func editVideo(_ call: CAPPluginCall) {
+        guard let path = call.getString("path"), !path.isEmpty else {
+            call.reject("Input file path is required")
+            return
+        }
+
+        let trim = call.getObject("trim") ?? JSObject()
+        let transcode = call.getObject("transcode") ?? JSObject()
+
+        do {
+            let trimSettings = try TrimSettings(
+                startsAt: self.intValue(trim, "startsAt", 0),
+                endsAt: self.intValue(trim, "endsAt", 0)
+            )
+
+            let transcodeSettings = try TranscodeSettings(
+                height: self.intValue(transcode, "height", 0),
+                width: self.intValue(transcode, "width", 0),
+                keepAspectRatio: transcode["keepAspectRatio"] as? Bool ?? true,
+                fps: self.intValue(transcode, "fps", 30),
+                videoBitrate: self.intValue(transcode, "videoBitrate", 0)
+            )
+
+            let srcFile = self.sourceUrl(from: path)
+            let outFile = self.getDestVideoUrl()
+
+            guard FileManager.default.isReadableFile(atPath: srcFile.path) else {
+                call.reject("Cannot read input file: \(srcFile.path)")
+                return
+            }
+
+            self.videoEditor.edit(
+                srcFile: srcFile,
+                outFile: outFile,
+                trimSettings: trimSettings,
+                transcodeSettings: transcodeSettings,
+                completionHandler: { [weak self] url in
+                    guard let self = self else { return }
+                    call.resolve(["file": self.createMediaFile(url: url)])
+                },
+                progressHandler: { [weak self] progress in
+                    self?.notifyListeners("transcodeProgress", data: ["progress": progress])
+                },
+                errorHandler: { error in
+                    try? FileManager.default.removeItem(at: outFile)
+                    call.reject(error)
+                }
+            )
+        } catch TrimSettingsError.invalidArgument(let message) {
+            call.reject(message)
+        } catch TranscodeSettingsError.invalidArgument(let message) {
+            call.reject(message)
+        } catch {
+            call.reject("Invalid parameters: \(error.localizedDescription)")
+        }
+    }
+
+    @objc func generateThumbnail(_ call: CAPPluginCall) {
+        guard let path = call.getString("path"), !path.isEmpty else {
+            call.reject("Input file path is required")
+            return
+        }
+
+        let atMs = call.getInt("at") ?? 0
+        let width = call.getInt("width") ?? 0
+        let height = call.getInt("height") ?? 0
+
+        let srcFile = self.sourceUrl(from: path)
+        let outFile = self.getDestImageUrl()
+
+        guard FileManager.default.isReadableFile(atPath: srcFile.path) else {
+            call.reject("Cannot read input file: \(srcFile.path)")
+            return
+        }
+
+        Task {
+            do {
+                try await self.videoEditor.thumbnail(
+                    srcFile: srcFile,
+                    outFile: outFile,
+                    atMs: atMs,
+                    width: width,
+                    height: height
+                )
+
+                call.resolve(["file": self.createMediaFile(url: outFile)])
+            } catch {
+                try? FileManager.default.removeItem(at: outFile)
+                call.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    /**
+     * Reads a numeric option. JS numbers reach the bridge as NSNumber, so a value written as
+     * 1000.0 still has to be accepted where an Int is expected.
+     */
+    func intValue(_ object: JSObject, _ key: String, _ defaultValue: Int) -> Int {
+        guard let number = object[key] as? NSNumber else {
+            return defaultValue
+        }
+
+        return number.intValue
+    }
+
+    /**
+     * Accepts a file:// url as well as a bare filesystem path.
+     */
+    func sourceUrl(from path: String) -> URL {
+        if let url = URL(string: path), url.isFileURL {
+            return url
+        }
+
+        // URL(string:) returns nil for an unencoded url, which a path holding a space produces.
+        if path.hasPrefix("file://") {
+            return URL(fileURLWithPath: String(path.dropFirst("file://".count)))
+        }
+
+        return URL(fileURLWithPath: path)
+    }
+
+    func getDestVideoUrl() -> URL {
+        return URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(NSUUID().uuidString)
+            .appendingPathExtension("mp4")
+    }
+
+    func getDestImageUrl() -> URL {
+        return URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(NSUUID().uuidString)
+            .appendingPathExtension("jpg")
+    }
+
+    func createMediaFile(url: URL) -> JSObject {
+        var fileSize = 0
+
+        if let resources = try? url.resourceValues(forKeys: [.fileSizeKey]) {
+            fileSize = resources.fileSize ?? 0
+        }
+
+        var file = JSObject()
+
+        file["name"] = url.lastPathComponent
+        file["path"] = url.absoluteString
+        file["type"] = self.getMimeType(url: url)
+        file["size"] = fileSize
+
+        return file
+    }
+
+    func getMimeType(url: URL) -> String {
+        if let type = UTType(filenameExtension: url.pathExtension), let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+
+        return "application/octet-stream"
     }
 }
