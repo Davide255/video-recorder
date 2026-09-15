@@ -205,6 +205,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     var audioDataOutput: AVCaptureAudioDataOutput?
     let audioMeterQueue = DispatchQueue(label: "video-recorder.audio-meter")
     private var lastMeterEmit: CFAbsoluteTime = 0
+    private var audioObservers: [NSObjectProtocol] = []
 
     var cameraInput: AVCaptureDeviceInput?
 
@@ -401,11 +402,35 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         }
     }
 
+    private static let mixingCategoryOptions: AVAudioSession.CategoryOptions = [
+        .mixWithOthers,
+        .defaultToSpeaker,
+        .allowBluetoothA2DP,
+        .allowAirPlay
+    ]
+
+    /** True when the shared session already has the record-capable, mixable setup we need. */
+    private func isAudioSessionConfiguredForMixing(_ session: AVAudioSession) -> Bool {
+        return session.category == .playAndRecord
+            && session.mode == .videoRecording
+            && session.categoryOptions.contains(.mixWithOthers)
+    }
+
     /**
      * Configures the shared audio session so the camera/mic never interrupt other
      * apps' audio. `.mixWithOthers` is the key option: with it set, activating our
      * (play-and-record) session does not stop background music. `.videoRecording`
      * mode is the camera-appropriate mode and plays nicely with mixing.
+     *
+     * The shared session is app-wide, so another plugin (e.g. NativeAudio) may already
+     * have activated it with a different category. Changing the category of an *active*
+     * session is applied immediately and rebuilds the audio route, and that rebuild pauses
+     * other apps' audio even though `.mixWithOthers` is set. So when the current setup is
+     * not ours, the session is first deactivated (silently: nothing of ours is playing),
+     * the category is set on the inactive session, and a single activation then applies
+     * it — an activation with `.mixWithOthers` is what iOS guarantees not to interrupt others.
+     * If the session cannot be deactivated (another player is running I/O) we fall back to
+     * changing the category in place.
      *
      * Note: with mixing enabled the microphone will also pick up any audio coming
      * out of the speaker — that is the inherent trade-off of keeping other audio
@@ -413,17 +438,116 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
      */
     private func configureAudioSessionForMixing() {
         let session = AVAudioSession.sharedInstance()
+        print("VideoRecorder: audio session before configure (category=\(session.category.rawValue), mode=\(session.mode.rawValue), options=\(session.categoryOptions.rawValue), otherAudioPlaying=\(session.isOtherAudioPlaying))")
         do {
-            try session.setCategory(.playAndRecord, mode: .videoRecording, options: [
-                .mixWithOthers,
-                .defaultToSpeaker,
-                .allowBluetoothA2DP,
-                .allowAirPlay
-            ])
+            if !isAudioSessionConfiguredForMixing(session) {
+                do {
+                    try session.setActive(false)
+                } catch {
+                    print("VideoRecorder: could not deactivate audio session before reconfiguring (changing category in place): \(error)")
+                }
+                try session.setCategory(.playAndRecord, mode: .videoRecording, options: Self.mixingCategoryOptions)
+            }
             try session.setActive(true)
+            print("VideoRecorder: audio session active (category=\(session.category.rawValue), mode=\(session.mode.rawValue), options=\(session.categoryOptions.rawValue), otherAudioPlaying=\(session.isOtherAudioPlaying))")
         } catch {
-            print("Failed to configure audio session for mixing: \(error)")
+            print("VideoRecorder: failed to configure audio session for mixing: \(error)")
         }
+    }
+
+    /**
+     * Called when something outside this plugin changed the shared session's category
+     * while the camera is up (NativeAudio's `configure()` does this on every app
+     * foreground/background transition in the host app). A non-record category silently
+     * kills the capture session's microphone and eventually surfaces as an
+     * AVCaptureSessionRuntimeError, so the record-capable mixable setup is restored.
+     */
+    private func restoreAudioSessionIfClobbered() {
+        guard self.captureSession != nil else { return }
+        let session = AVAudioSession.sharedInstance()
+        guard !isAudioSessionConfiguredForMixing(session) else { return }
+        print("VideoRecorder: audio session category was changed externally (category=\(session.category.rawValue), options=\(session.categoryOptions.rawValue)); restoring record+mix")
+        configureAudioSessionForMixing()
+    }
+
+    /**
+     * An AVCaptureSession that hit a runtime error (typically because the audio device
+     * was pulled out from under it by an external category change) may stop running.
+     * Once the audio session is back to a record-capable category it can be restarted.
+     */
+    private func restartCaptureSessionIfStopped() {
+        guard let captureSession = self.captureSession, !captureSession.isRunning else { return }
+        print("VideoRecorder: capture session stopped after runtime error; restarting")
+        DispatchQueue.global(qos: .userInitiated).async {
+            captureSession.startRunning()
+        }
+    }
+
+    /**
+     * Deactivates the shared audio session once the capture session has been torn down.
+     * `.notifyOthersOnDeactivation` is what tells a music app it may resume. Deactivating
+     * while the capture session's audio I/O is still being released fails with
+     * "session is busy" (560030580), so this is scheduled after the current run-loop turn
+     * and retried once.
+     */
+    private func deactivateAudioSession(attempt: Int = 0) {
+        DispatchQueue.main.async {
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                print("VideoRecorder: audio session deactivated")
+            } catch {
+                print("VideoRecorder: failed to deactivate audio session (attempt \(attempt)): \(error)")
+                if attempt < 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        self.deactivateAudioSession(attempt: attempt + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Diagnostics: logs why the audio session or the capture session got interrupted
+     * or re-routed, so any remaining "music stopped" case shows its trigger in the console.
+     */
+    private func startAudioDiagnostics() {
+        guard audioObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+
+        audioObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { note in
+            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+            print("VideoRecorder: audio session interruption type=\(type.map { "\($0.rawValue)" } ?? "?") reason=\(reason.map { "\($0)" } ?? "?")")
+        })
+
+        audioObservers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap(AVAudioSession.RouteChangeReason.init)
+            let outputs = AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }
+            print("VideoRecorder: audio route change reason=\(reason.map { "\($0.rawValue)" } ?? "?") outputs=\(outputs)")
+            if reason == .categoryChange {
+                self?.restoreAudioSessionIfClobbered()
+            }
+        })
+
+        audioObservers.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted, object: nil, queue: .main) { note in
+            let reason = (note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int).flatMap(AVCaptureSession.InterruptionReason.init)
+            print("VideoRecorder: capture session interrupted reason=\(reason.map { "\($0.rawValue)" } ?? "?")")
+        })
+
+        audioObservers.append(center.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: nil, queue: .main) { _ in
+            print("VideoRecorder: capture session interruption ended")
+        })
+
+        audioObservers.append(center.addObserver(forName: .AVCaptureSessionRuntimeError, object: nil, queue: .main) { [weak self] note in
+            print("VideoRecorder: capture session runtime error \(note.userInfo?[AVCaptureSessionErrorKey] ?? "?")")
+            self?.restoreAudioSessionIfClobbered()
+            self?.restartCaptureSessionIfStopped()
+        })
+    }
+
+    private func stopAudioDiagnostics() {
+        audioObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        audioObservers = []
     }
 
     /**
@@ -491,6 +615,14 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                             self.currentCamera = 1
                         }
 
+                        // Configure and activate the shared audio session BEFORE any capture
+                        // object exists. Creating/committing the microphone input can activate
+                        // the app's audio session; if that happens while it still has the iOS
+                        // default (solo-ambient, non-mixable) category, other apps' audio is
+                        // interrupted and setting `.mixWithOthers` afterwards cannot undo it.
+                        self.startAudioDiagnostics()
+                        self.configureAudioSessionForMixing()
+
                         // Create capture session
                         self.captureSession = AVCaptureSession()
                         // Begin configuration
@@ -550,15 +682,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                         let connection: AVCaptureConnection? = self.videoOutput?.connection(with: .video)
                         self.videoOutput?.setOutputSettings([AVVideoCodecKey : AVVideoCodecType.h264], for: connection!)
 
-                        // Commit configurations
+                        // Commit configurations. Because `automaticallyConfiguresApplicationAudioSession`
+                        // is false, nothing overwrites the mixable audio session configured above.
                         self.captureSession?.commitConfiguration()
-
-                        // Configure the audio session AFTER the capture session is fully
-                        // committed. Because `automaticallyConfiguresApplicationAudioSession`
-                        // is false, nothing overwrites these options, so `.mixWithOthers`
-                        // actually sticks and other apps' audio (e.g. background music)
-                        // keeps playing while the camera previews and records.
-                        self.configureAudioSessionForMixing()
 
                         // Route metering samples to our delegate on a dedicated queue.
                         self.audioDataOutput?.setSampleBufferDelegate(self, queue: self.audioMeterQueue)
@@ -622,7 +748,11 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                 self.pendingCameraSwitch = nil
                 self.shouldStopAfterSwitch = false
                 self.notifyListeners("onVolumeInput", data: ["value":0])
-                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                // Deactivate on a later run-loop turn so the released capture objects have
+                // finished tearing down their audio I/O; otherwise the call fails as "busy"
+                // and the music app never gets the resume notification.
+                self.deactivateAudioSession()
+                self.stopAudioDiagnostics()
             }
             call.resolve()
         }
@@ -861,9 +991,10 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                     if let audioConnection = self.videoOutput?.connection(with: .audio) {
                         audioConnection.isEnabled = self.isMicrophoneEnabled
                     }
-                    // Re-assert mixing in case starting the recording nudged the audio session,
-                    // so background music keeps playing throughout the recording.
-                    self.configureAudioSessionForMixing()
+                    // Do NOT touch the audio session here: it is already active and mixable
+                    // (automatic configuration is off, so nothing can have changed it).
+                    // Re-applying the category on a running session rebuilds the audio route,
+                    // which music apps treat as a route change and pause on.
                     self.videoOutput?.startRecording(to: fileUrl, recordingDelegate: self)
                     call.resolve()
                 }
