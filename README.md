@@ -488,17 +488,18 @@ iOS only.
 ### getAvailableQualities(...)
 
 ```typescript
-getAvailableQualities(options?: { camera?: VideoRecorderCamera | undefined; } | undefined) => Promise<{ qualities: VideoRecorderQuality[]; }>
+getAvailableQualities(options?: { camera?: VideoRecorderCamera | undefined; } | undefined) => Promise<{ qualities: VideoRecorderQualityInfo[]; }>
 ```
 
-Returns which <a href="#videorecorderquality">`VideoRecorderQuality`</a> presets the given camera supports on this device.
+Returns which <a href="#videorecorderquality">`VideoRecorderQuality`</a> presets the given camera supports on this device,
+each with the maximum frame rate available at that quality.
 Defaults to the currently active camera, or the back camera if not yet initialized.
 
 | Param         | Type                                                                              |
 | ------------- | --------------------------------------------------------------------------------- |
 | **`options`** | <code>{ camera?: <a href="#videorecordercamera">VideoRecorderCamera</a>; }</code> |
 
-**Returns:** <code>Promise&lt;{ qualities: VideoRecorderQuality[]; }&gt;</code>
+**Returns:** <code>Promise&lt;{ qualities: VideoRecorderQualityInfo[]; }&gt;</code>
 
 --------------------
 
@@ -644,6 +645,14 @@ Fired while `editVideo()` is transcoding.
 | **`id`**       | <code>string</code>                               | Unique device identifier to pass to switchCamera |
 | **`position`** | <code>'front' \| 'back'</code>                    |                                                  |
 | **`type`**     | <code>'wide' \| 'ultrawide' \| 'telephoto'</code> |                                                  |
+
+
+#### VideoRecorderQualityInfo
+
+| Prop          | Type                                                                  | Description                                                                   |
+| ------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **`quality`** | <code><a href="#videorecorderquality">VideoRecorderQuality</a></code> |                                                                               |
+| **`maxFps`**  | <code>number</code>                                                   | Maximum frame rate the device supports at this quality, in frames per second. |
 
 
 #### MediaFileResult

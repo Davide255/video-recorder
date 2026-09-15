@@ -470,7 +470,11 @@ public class VideoRecorderPlugin extends Plugin {
         JSArray qualities = new JSArray();
         for (int i = 0; i < QUALITY_PROFILES.length; i++) {
             if (CamcorderProfile.hasProfile(cameraId, QUALITY_PROFILES[i])) {
-                qualities.put(i);
+                CamcorderProfile profile = CamcorderProfile.get(cameraId, QUALITY_PROFILES[i]);
+                JSObject entry = new JSObject();
+                entry.put("quality", i);
+                entry.put("maxFps", profile.videoFrameRate);
+                qualities.put(entry);
             }
         }
 

@@ -1017,17 +1017,59 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         }
     }
 
+    /// Which of a device's `AVCaptureDevice.Format`s to consult for the max frame rate of a
+    /// quality: an exact resolution match for the fixed presets, or the largest/smallest
+    /// available format for `.high`/`.low` (which pick a resolution dynamically per device).
+    private enum FrameRateFormatSelection {
+        case exactSize(width: Int32, height: Int32)
+        case largest
+        case smallest
+    }
+
     /// Maps each `VideoRecorderQuality` raw value (see definitions.ts) to the session preset
     /// `initialize()` applies for it, so support can be checked without an active session.
-    private static let qualityPresets: [(Int, AVCaptureSession.Preset)] = [
-        (0, .vga640x480),
-        (1, .hd1280x720),
-        (2, .hd1920x1080),
-        (3, .hd4K3840x2160),
-        (4, .high),
-        (5, .low),
-        (6, .cif352x288),
+    private static let qualityPresets: [(Int, AVCaptureSession.Preset, FrameRateFormatSelection)] = [
+        (0, .vga640x480, .exactSize(width: 640, height: 480)),
+        (1, .hd1280x720, .exactSize(width: 1280, height: 720)),
+        (2, .hd1920x1080, .exactSize(width: 1920, height: 1080)),
+        (3, .hd4K3840x2160, .exactSize(width: 3840, height: 2160)),
+        (4, .high, .largest),
+        (5, .low, .smallest),
+        (6, .cif352x288, .exactSize(width: 352, height: 288)),
     ]
+
+    private static func pixelCount(of format: AVCaptureDevice.Format) -> Int32 {
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        return dimensions.width * dimensions.height
+    }
+
+    /// The highest frame rate the device can record at for a given quality, found by matching
+    /// its resolution (or, for `.high`/`.low`, the largest/smallest available) against the
+    /// device's supported formats and reading their frame rate ranges.
+    private static func maxFrameRate(for device: AVCaptureDevice, selection: FrameRateFormatSelection) -> Double {
+        let formats = device.formats
+        let candidates: [AVCaptureDevice.Format]
+
+        switch selection {
+        case .exactSize(let width, let height):
+            let matches = formats.filter {
+                let dimensions = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                return dimensions.width == width && dimensions.height == height
+            }
+            candidates = matches.isEmpty ? formats : matches
+        case .largest:
+            candidates = formats.max(by: { pixelCount(of: $0) < pixelCount(of: $1) }).map { [$0] } ?? formats
+        case .smallest:
+            candidates = formats.min(by: { pixelCount(of: $0) < pixelCount(of: $1) }).map { [$0] } ?? formats
+        }
+
+        let maxRate = candidates
+            .flatMap { $0.videoSupportedFrameRateRanges }
+            .map { $0.maxFrameRate }
+            .max()
+
+        return maxRate ?? 30
+    }
 
     @objc func getAvailableQualities(_ call: CAPPluginCall) {
         let devicePosition: AVCaptureDevice.Position
@@ -1050,9 +1092,13 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
             return
         }
 
-        let qualities = VideoRecorder.qualityPresets
-            .filter { device.supportsSessionPreset($0.1) }
-            .map { $0.0 }
+        let qualities: [[String: Any]] = VideoRecorder.qualityPresets.compactMap { (raw, preset, selection) in
+            guard device.supportsSessionPreset(preset) else { return nil }
+            return [
+                "quality": raw,
+                "maxFps": VideoRecorder.maxFrameRate(for: device, selection: selection)
+            ]
+        }
 
         call.resolve(["qualities": qualities])
     }

@@ -37,10 +37,11 @@ export interface VideoRecorderPlugin {
    */
   getAvailableCameras(): Promise<{ cameras: VideoRecorderCameraInfo[] }>;
   /**
-   * Returns which `VideoRecorderQuality` presets the given camera supports on this device.
+   * Returns which `VideoRecorderQuality` presets the given camera supports on this device,
+   * each with the maximum frame rate available at that quality.
    * Defaults to the currently active camera, or the back camera if not yet initialized.
    */
-  getAvailableQualities(options?: { camera?: VideoRecorderCamera }): Promise<{ qualities: VideoRecorderQuality[] }>;
+  getAvailableQualities(options?: { camera?: VideoRecorderCamera }): Promise<{ qualities: VideoRecorderQualityInfo[] }>;
   /**
    * Switches to a specific camera by its id (from getAvailableCameras).
    * iOS only.
@@ -130,6 +131,14 @@ export interface VideoRecorderOptions {
 export enum VideoRecorderCamera {
   FRONT = 0,
   BACK = 1,
+}
+
+export interface VideoRecorderQualityInfo {
+  quality: VideoRecorderQuality;
+  /**
+   * Maximum frame rate the device supports at this quality, in frames per second.
+   */
+  maxFps: number;
 }
 
 export enum VideoRecorderQuality {
