@@ -5,6 +5,8 @@ import type {
 	VideoRecorderOptions,
 	VideoRecorderPreviewFrame,
 	VideoRecorderCameraInfo,
+	VideoRecorderCamera,
+	VideoRecorderQuality,
 	VideoEditOptions,
 	VideoThumbnailOptions,
 	MediaFileResult,
@@ -238,6 +240,11 @@ export class VideoRecorderWeb extends WebPlugin implements VideoRecorderPlugin {
 	switchCamera(_options: { cameraId: string }): Promise<void> {
 		console.warn('VideoRecorder: No web mock available for switchCamera');
 		return Promise.resolve();
+	}
+
+	getAvailableQualities(_options?: { camera?: VideoRecorderCamera }): Promise<{ qualities: VideoRecorderQuality[] }> {
+		console.warn('VideoRecorder: No web mock available for getAvailableQualities');
+		return Promise.resolve({ qualities: [] });
 	}
 
 	editVideo(options: VideoEditOptions): Promise<MediaFileResult> {

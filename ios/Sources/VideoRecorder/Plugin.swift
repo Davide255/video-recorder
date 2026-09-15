@@ -185,6 +185,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         CAPPluginMethod(name: "disableMicrophone", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getAvailableCameras", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "switchCamera", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getAvailableQualities", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "editVideo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "generateThumbnail", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancelEdit", returnType: CAPPluginReturnPromise),
@@ -1014,6 +1015,46 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         } catch {
             call.reject("Could not switch camera: \(error.localizedDescription)")
         }
+    }
+
+    /// Maps each `VideoRecorderQuality` raw value (see definitions.ts) to the session preset
+    /// `initialize()` applies for it, so support can be checked without an active session.
+    private static let qualityPresets: [(Int, AVCaptureSession.Preset)] = [
+        (0, .vga640x480),
+        (1, .hd1280x720),
+        (2, .hd1920x1080),
+        (3, .hd4K3840x2160),
+        (4, .high),
+        (5, .low),
+        (6, .cif352x288),
+    ]
+
+    @objc func getAvailableQualities(_ call: CAPPluginCall) {
+        let devicePosition: AVCaptureDevice.Position
+        if let cameraOption = call.getInt("camera") {
+            devicePosition = cameraOption == 1 ? .back : .front
+        } else if self.captureSession != nil {
+            devicePosition = self.currentCamera == 1 ? .back : .front
+        } else {
+            devicePosition = .back
+        }
+
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera],
+            mediaType: .video,
+            position: devicePosition
+        )
+
+        guard let device = discoverySession.devices.first else {
+            call.reject(devicePosition == .back ? "Back camera unavailable" : "Front camera unavailable")
+            return
+        }
+
+        let qualities = VideoRecorder.qualityPresets
+            .filter { device.supportsSessionPreset($0.1) }
+            .map { $0.0 }
+
+        call.resolve(["qualities": qualities])
     }
 
     @objc func isFlashAvailable(_ call: CAPPluginCall) {

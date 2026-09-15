@@ -260,6 +260,7 @@ The demo app can be found in the Example folder of this repo
 * [`enableMicrophone()`](#enablemicrophone)
 * [`disableMicrophone()`](#disablemicrophone)
 * [`getAvailableCameras()`](#getavailablecameras)
+* [`getAvailableQualities(...)`](#getavailablequalities)
 * [`switchCamera(...)`](#switchcamera)
 * [`editVideo(...)`](#editvideo)
 * [`generateThumbnail(...)`](#generatethumbnail)
@@ -480,6 +481,24 @@ Returns all available physical cameras on the device.
 iOS only.
 
 **Returns:** <code>Promise&lt;{ cameras: VideoRecorderCameraInfo[]; }&gt;</code>
+
+--------------------
+
+
+### getAvailableQualities(...)
+
+```typescript
+getAvailableQualities(options?: { camera?: VideoRecorderCamera | undefined; } | undefined) => Promise<{ qualities: VideoRecorderQuality[]; }>
+```
+
+Returns which <a href="#videorecorderquality">`VideoRecorderQuality`</a> presets the given camera supports on this device.
+Defaults to the currently active camera, or the back camera if not yet initialized.
+
+| Param         | Type                                                                              |
+| ------------- | --------------------------------------------------------------------------------- |
+| **`options`** | <code>{ camera?: <a href="#videorecordercamera">VideoRecorderCamera</a>; }</code> |
+
+**Returns:** <code>Promise&lt;{ qualities: VideoRecorderQuality[]; }&gt;</code>
 
 --------------------
 

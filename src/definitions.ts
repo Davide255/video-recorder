@@ -37,6 +37,11 @@ export interface VideoRecorderPlugin {
    */
   getAvailableCameras(): Promise<{ cameras: VideoRecorderCameraInfo[] }>;
   /**
+   * Returns which `VideoRecorderQuality` presets the given camera supports on this device.
+   * Defaults to the currently active camera, or the back camera if not yet initialized.
+   */
+  getAvailableQualities(options?: { camera?: VideoRecorderCamera }): Promise<{ qualities: VideoRecorderQuality[] }>;
+  /**
    * Switches to a specific camera by its id (from getAvailableCameras).
    * iOS only.
    */

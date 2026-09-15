@@ -5,6 +5,8 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
+import android.hardware.Camera;
+import android.media.CamcorderProfile;
 import android.net.Uri;
 import android.os.Build;
 import android.text.TextUtils;
@@ -431,6 +433,62 @@ public class VideoRecorderPlugin extends Plugin {
         JSObject object = new JSObject();
         object.put("isAvailable", fancyCamera.hasFlash());
         call.resolve(object);
+    }
+
+    /**
+     * Raw values match VideoRecorderQuality in definitions.ts (and the FancyCamera Quality enum
+     * it is passed through to): MAX_480P, MAX_720P, MAX_1080P, MAX_2160P, HIGHEST, LOWEST, QVGA.
+     */
+    private static final int[] QUALITY_PROFILES = {
+        CamcorderProfile.QUALITY_480P,
+        CamcorderProfile.QUALITY_720P,
+        CamcorderProfile.QUALITY_1080P,
+        CamcorderProfile.QUALITY_2160P,
+        CamcorderProfile.QUALITY_HIGH,
+        CamcorderProfile.QUALITY_LOW,
+        CamcorderProfile.QUALITY_QVGA,
+    };
+
+    @PluginMethod()
+    public void getAvailableQualities(PluginCall call) {
+        Integer cameraOption = call.getInt("camera");
+        int facing;
+        if (cameraOption != null) {
+            facing = cameraOption == 1 ? Camera.CameraInfo.CAMERA_FACING_BACK : Camera.CameraInfo.CAMERA_FACING_FRONT;
+        } else if (fancyCamera != null && fancyCamera.cameraStarted()) {
+            facing = currentCameraPositionInt == 0 ? Camera.CameraInfo.CAMERA_FACING_BACK : Camera.CameraInfo.CAMERA_FACING_FRONT;
+        } else {
+            facing = Camera.CameraInfo.CAMERA_FACING_BACK;
+        }
+
+        int cameraId = findCameraId(facing);
+        if (cameraId == -1) {
+            call.reject(facing == Camera.CameraInfo.CAMERA_FACING_BACK ? "Back camera unavailable" : "Front camera unavailable");
+            return;
+        }
+
+        JSArray qualities = new JSArray();
+        for (int i = 0; i < QUALITY_PROFILES.length; i++) {
+            if (CamcorderProfile.hasProfile(cameraId, QUALITY_PROFILES[i])) {
+                qualities.put(i);
+            }
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("qualities", qualities);
+        call.resolve(ret);
+    }
+
+    private static int findCameraId(int facing) {
+        Camera.CameraInfo info = new Camera.CameraInfo();
+        int numCameras = Camera.getNumberOfCameras();
+        for (int i = 0; i < numCameras; i++) {
+            Camera.getCameraInfo(i, info);
+            if (info.facing == facing) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     @PluginMethod()
