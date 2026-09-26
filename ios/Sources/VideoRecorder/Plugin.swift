@@ -206,6 +206,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     let audioMeterQueue = DispatchQueue(label: "video-recorder.audio-meter")
     private var lastMeterEmit: CFAbsoluteTime = 0
     private var audioObservers: [NSObjectProtocol] = []
+    /// The shared session's setup before the camera took it over, restored on destroy().
+    private var savedAudioCategory: (category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)?
 
     var cameraInput: AVCaptureDeviceInput?
 
@@ -488,21 +490,45 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
      * `.notifyOthersOnDeactivation` is what tells a music app it may resume. Deactivating
      * while the capture session's audio I/O is still being released fails with
      * "session is busy" (560030580), so this is scheduled after the current run-loop turn
-     * and retried once.
+     * and retried.
+     *
+     * Once inactive, the category the camera found is put back. Leaving `.playAndRecord`
+     * behind is harmful: NativeAudio's play()/loop() do not set a category, so the next
+     * AVAudioPlayer (e.g. the host app's background keep-alive) implicitly re-activates the
+     * session as play-and-record — the mic route comes up, background music blips, and
+     * `.defaultToSpeaker` can pull output off Bluetooth. NativeAudio also refuses to
+     * deactivate a record-capable session, so its next configure() then changes the
+     * category of an *active* session and interrupts the music. Setting the category on
+     * the inactive session changes no route, so restoring it here is silent.
      */
     private func deactivateAudioSession(attempt: Int = 0) {
         DispatchQueue.main.async {
+            let session = AVAudioSession.sharedInstance()
             do {
-                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                try session.setActive(false, options: .notifyOthersOnDeactivation)
                 print("VideoRecorder: audio session deactivated")
+                self.restoreSavedAudioCategory()
             } catch {
                 print("VideoRecorder: failed to deactivate audio session (attempt \(attempt)): \(error)")
-                if attempt < 1 {
+                if attempt < 2 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         self.deactivateAudioSession(attempt: attempt + 1)
                     }
                 }
             }
+        }
+    }
+
+    /** Puts back the category captured by initialize(); only called on an inactive session. */
+    private func restoreSavedAudioCategory() {
+        // A new camera session may have started while deactivation was pending.
+        guard self.captureSession == nil, let saved = self.savedAudioCategory else { return }
+        self.savedAudioCategory = nil
+        do {
+            try AVAudioSession.sharedInstance().setCategory(saved.category, mode: saved.mode, options: saved.options)
+            print("VideoRecorder: audio session category restored (category=\(saved.category.rawValue), mode=\(saved.mode.rawValue), options=\(saved.options.rawValue))")
+        } catch {
+            print("VideoRecorder: failed to restore audio session category: \(error)")
         }
     }
 
@@ -621,6 +647,12 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                         // default (solo-ambient, non-mixable) category, other apps' audio is
                         // interrupted and setting `.mixWithOthers` afterwards cannot undo it.
                         self.startAudioDiagnostics()
+                        // Kept when still set: a destroy() whose restore is pending already
+                        // holds the setup from before the previous camera session.
+                        let session = AVAudioSession.sharedInstance()
+                        if self.savedAudioCategory == nil && !self.isAudioSessionConfiguredForMixing(session) {
+                            self.savedAudioCategory = (session.category, session.mode, session.categoryOptions)
+                        }
                         self.configureAudioSessionForMixing()
 
                         // Create capture session
