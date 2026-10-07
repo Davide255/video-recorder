@@ -207,6 +207,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     private var lastMeterEmit: CFAbsoluteTime = 0
     private var audioObservers: [NSObjectProtocol] = []
     /// The shared session's setup before the camera took it over, restored on destroy().
+    /// The web view's scroll view and under-page colours from before the camera cleared them,
+    /// put back on destroy().
+    private var savedWebViewBackgrounds: (scroll: UIColor?, underPage: UIColor)?
     private var savedAudioCategory: (category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)?
 
     var cameraInput: AVCaptureDeviceInput?
@@ -710,6 +713,15 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                         }
                         self.capWebView?.isOpaque = false
                         self.capWebView?.backgroundColor = UIColor.clear
+                        // The scroll view under the page keeps its own colour (systemBackground,
+                        // black in dark mode) and paints it over the preview behind the web view.
+                        if let webView = self.capWebView {
+                            if self.savedWebViewBackgrounds == nil {
+                                self.savedWebViewBackgrounds = (webView.scrollView.backgroundColor, webView.underPageBackgroundColor)
+                            }
+                            webView.scrollView.backgroundColor = UIColor.clear
+                            webView.underPageBackgroundColor = UIColor.clear
+                        }
 
                         let deviceDescoverySession = AVCaptureDevice.DiscoverySession.init(
                             deviceTypes: [AVCaptureDevice.DeviceType.builtInWideAngleCamera],
@@ -846,6 +858,11 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
 
             self.capWebView?.isOpaque = true
             self.capWebView?.backgroundColor = UIColor.white
+            if let webView = self.capWebView, let saved = self.savedWebViewBackgrounds {
+                webView.scrollView.backgroundColor = saved.scroll
+                webView.underPageBackgroundColor = saved.underPage
+                self.savedWebViewBackgrounds = nil
+            }
             if (self.captureSession != nil) {
 				// Need to destroy all preview layers
                 self.previewFrameConfigs = []
