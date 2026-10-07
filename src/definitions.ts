@@ -126,6 +126,17 @@ export interface VideoRecorderOptions {
    * @memberof VideoRecorderOptions
    */
   videoBitrate?: number;
+  /**
+   * Frame rate to record at, e.g. 60. The camera is put on a format of the chosen
+   * quality's resolution that supports it; when none does, the fastest one below is used
+   * (see `getAvailableQualities()` for each quality's `maxFps`). When omitted, the
+   * quality's preset decides, which is 30 fps.
+   * iOS only: Android records at the rate of the quality's camcorder profile.
+   * @default undefined
+   * @type {number}
+   * @memberof VideoRecorderOptions
+   */
+  fps?: number;
 }
 
 export enum VideoRecorderCamera {
