@@ -207,6 +207,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     private var lastMeterEmit: CFAbsoluteTime = 0
     private var audioObservers: [NSObjectProtocol] = []
     /// The shared session's setup before the camera took it over, restored on destroy().
+    /// The web view's scroll view and under-page colours from before the camera cleared them,
+    /// put back on destroy().
+    private var savedWebViewBackgrounds: (scroll: UIColor?, underPage: UIColor)?
     private var savedAudioCategory: (category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)?
 
     var cameraInput: AVCaptureDeviceInput?
@@ -217,6 +220,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     var allCameras: [AVCaptureDevice] = []
     var quality: Int = 0
     var videoBitrate: Int = 3000000
+    /// Frame rate asked for in initialize(); 0 leaves the session preset's default (30 fps).
+    var fps: Int = 0
     var _isFlashEnabled: Bool = false
     var isMicrophoneEnabled: Bool = true
 
@@ -346,9 +351,93 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         self.captureSession?.addInput(newInput)
         self.cameraInput = newInput
         self.currentCamera = newCameraPosition
+        self.applyFrameRate(to: newInput.device)
         self.captureSession?.commitConfiguration()
         DispatchQueue.main.async {
             self.updateCameraView(self.currentFrameConfig)
+        }
+    }
+
+    /// Puts `device` on a format of the chosen quality's resolution that can run at `fps`
+    /// and locks the frame rate there. Session presets pick a format but leave the rate at
+    /// 30 fps, and most devices only reach 60+ on another format of the same size, so the
+    /// format has to be chosen by hand. Setting it moves the session to `.inputPriority`.
+    ///
+    /// Called inside the session's begin/commitConfiguration, after the preset is set and
+    /// whenever the camera input changes, as a new device starts from the preset again.
+    /// When no format of that size reaches `fps`, the fastest one below it is used.
+    private func applyFrameRate(to device: AVCaptureDevice) {
+        let preset = VideoRecorder.qualityPresets.first(where: { $0.0 == self.quality })
+
+        // A format set by hand left the session on `.inputPriority`, where a new camera
+        // keeps its own default format: go back to the quality's preset first.
+        if let session = self.captureSession, session.sessionPreset == .inputPriority,
+           let preset = preset, session.canSetSessionPreset(preset.1) {
+            session.sessionPreset = preset.1
+        }
+
+        guard self.fps > 0 else { return }
+
+        let active = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        let size: (width: Int32, height: Int32)
+        if let preset = preset, case .exactSize(let width, let height) = preset.2 {
+            size = (width, height)
+        } else {
+            size = (active.width, active.height)
+        }
+
+        let activeSubType = CMFormatDescriptionGetMediaSubType(device.activeFormat.formatDescription)
+        let maxRate = { (format: AVCaptureDevice.Format) in
+            format.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+        }
+        let sameSize = device.formats.filter {
+            let dimensions = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            return dimensions.width == size.width && dimensions.height == size.height
+        }
+        guard !sameSize.isEmpty else { return }
+
+        let target = Double(self.fps)
+        let fastest = sameSize.map(maxRate).max() ?? 0
+        let rate = min(target, fastest)
+        guard rate > 0 else { return }
+
+        // Keep the active format when it can already do it, then prefer the preset's pixel
+        // format (video/full range) and the slowest format that suffices, which keeps the
+        // field of view and binning of the ordinary formats over the high-speed ones.
+        let candidates = sameSize.filter { maxRate($0) >= rate }
+        let format: AVCaptureDevice.Format?
+        if candidates.contains(device.activeFormat) {
+            format = device.activeFormat
+        } else {
+            format = candidates
+                .sorted {
+                    let lhsSame = CMFormatDescriptionGetMediaSubType($0.formatDescription) == activeSubType
+                    let rhsSame = CMFormatDescriptionGetMediaSubType($1.formatDescription) == activeSubType
+                    if lhsSame != rhsSame { return lhsSame }
+                    return maxRate($0) < maxRate($1)
+                }
+                .first
+        }
+        guard let format = format,
+              let range = format.videoSupportedFrameRateRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate })
+        else { return }
+
+        // A duration outside the format's range raises an Objective-C exception, which
+        // Swift cannot catch: clamp to it (e.g. 1/60 on a format that tops out at 59.94).
+        var duration = CMTime(value: 1, timescale: CMTimeScale(rate.rounded()))
+        if CMTimeCompare(duration, range.minFrameDuration) < 0 { duration = range.minFrameDuration }
+        if CMTimeCompare(duration, range.maxFrameDuration) > 0 { duration = range.maxFrameDuration }
+
+        do {
+            try device.lockForConfiguration()
+            if device.activeFormat != format {
+                device.activeFormat = format
+            }
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            device.unlockForConfiguration()
+        } catch {
+            print("Could not set frame rate to \(rate): \(error.localizedDescription)")
         }
     }
 
@@ -607,6 +696,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
             self.currentCamera = call.getInt("camera", 0)
             self.quality = call.getInt("quality", 0)
             self.videoBitrate = call.getInt("videoBitrate", 3000000)
+            self.fps = call.getInt("fps", 0)
             let autoShow = call.getBool("autoShow", true)
 
             for frameConfig in call.getArray("previewFrames", [ ["id": "default"] ]) {
@@ -623,6 +713,15 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                         }
                         self.capWebView?.isOpaque = false
                         self.capWebView?.backgroundColor = UIColor.clear
+                        // The scroll view under the page keeps its own colour (systemBackground,
+                        // black in dark mode) and paints it over the preview behind the web view.
+                        if let webView = self.capWebView {
+                            if self.savedWebViewBackgrounds == nil {
+                                self.savedWebViewBackgrounds = (webView.scrollView.backgroundColor, webView.underPageBackgroundColor)
+                            }
+                            webView.scrollView.backgroundColor = UIColor.clear
+                            webView.underPageBackgroundColor = UIColor.clear
+                        }
 
                         let deviceDescoverySession = AVCaptureDevice.DiscoverySession.init(
                             deviceTypes: [AVCaptureDevice.DeviceType.builtInWideAngleCamera],
@@ -711,6 +810,9 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                             break;
                         }
 
+                        // After the preset: a preset records at 30 fps whatever the camera can do.
+                        self.applyFrameRate(to: self.cameraInput!.device)
+
                         let connection: AVCaptureConnection? = self.videoOutput?.connection(with: .video)
                         self.videoOutput?.setOutputSettings([AVVideoCodecKey : AVVideoCodecType.h264], for: connection!)
 
@@ -756,6 +858,11 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
 
             self.capWebView?.isOpaque = true
             self.capWebView?.backgroundColor = UIColor.white
+            if let webView = self.capWebView, let saved = self.savedWebViewBackgrounds {
+                webView.scrollView.backgroundColor = saved.scroll
+                webView.underPageBackgroundColor = saved.underPage
+                self.savedWebViewBackgrounds = nil
+            }
             if (self.captureSession != nil) {
 				// Need to destroy all preview layers
                 self.previewFrameConfigs = []
@@ -1169,6 +1276,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                 self.captureSession?.addInput(newInput)
                 self.cameraInput = newInput
                 self.currentCamera = newCameraPosition
+                self.applyFrameRate(to: newInput.device)
                 self.captureSession?.commitConfiguration()
                 DispatchQueue.main.async {
                     self.updateCameraView(self.currentFrameConfig)
