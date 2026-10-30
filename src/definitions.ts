@@ -98,13 +98,20 @@ export interface VideoRecorderZoom {
   factor: number;
   min: number;
   max: number;
+  /**
+   * The factor that is "1×" for the user. On iOS phones with several back lenses the camera
+   * zooms across all of them and 1× (the main lens) is not factor 1. Defaults to 1.
+   */
+  unit?: number;
+  /** Lenses as user-facing zoom values (e.g. 0.5, 1, 3), when the camera switches between them. */
+  stops?: number[];
 }
 
 export interface VideoRecorderCameraInfo {
   /** Unique device identifier to pass to switchCamera */
   id: string;
   position: 'front' | 'back';
-  type: 'wide' | 'ultrawide' | 'telephoto';
+  type: 'wide' | 'ultrawide' | 'telephoto' | 'auto';
 }
 export interface VideoRecorderPreviewFrame {
   id: string;

@@ -738,6 +738,12 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                             }
                         }
 
+                        // A virtual multi-lens device zooms across its lenses and switches between
+                        // them by itself, where the plain wide camera is stuck on one lens.
+                        if let virtual = VideoRecorder.virtualBackCamera() {
+                            self.backCamera = virtual
+                        }
+
                         if (self.backCamera == nil) {
                             self.currentCamera = 1
                         }
@@ -1219,7 +1225,11 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                     mediaType: .video,
                     position: .unspecified
                 )
-                self.allCameras = discovery.devices
+                var devices = discovery.devices
+                if let virtual = VideoRecorder.virtualBackCamera() {
+                    devices = devices.filter { $0.position != .back } + [virtual]
+                }
+                self.allCameras = devices
             }
             let cameras: [[String: Any]] = self.allCameras.map { device in
                 let position = device.position == .front ? "front" : "back"
@@ -1228,6 +1238,7 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
                     switch device.deviceType {
                     case .builtInUltraWideCamera: type = "ultrawide"
                     case .builtInTelephotoCamera: type = "telephoto"
+                    case .builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera: type = "auto"
                     default: type = "wide"
                     }
                 }
@@ -1412,12 +1423,30 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
     /// Upper bound for zoom, whatever the device allows: past it the image is only a crop.
     private static let maxZoomFactor: CGFloat = 10
 
+    /// The back camera that spans all the lenses the phone has, if it has more than one.
+    private static func virtualBackCamera() -> AVCaptureDevice? {
+        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera]
+        return AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .back).devices.first
+    }
+
     private func zoomState(of device: AVCaptureDevice) -> [String: Any] {
-        return [
+        // On a virtual device, zoom 1 is its widest lens. The main camera, what people call
+        // 1x, sits at the first lens switch-over when the widest one is an ultra wide.
+        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+        var unit: CGFloat = 1
+        if device.constituentDevices.first?.deviceType == .builtInUltraWideCamera, let first = switchOvers.first {
+            unit = first
+        }
+        var state: [String: Any] = [
             "factor": device.videoZoomFactor,
             "min": device.minAvailableVideoZoomFactor,
-            "max": min(device.maxAvailableVideoZoomFactor, VideoRecorder.maxZoomFactor)
+            "max": min(device.maxAvailableVideoZoomFactor, VideoRecorder.maxZoomFactor),
+            "unit": unit
         ]
+        if !switchOvers.isEmpty {
+            state["stops"] = ([1] + switchOvers).map { ($0 / unit * 10).rounded() / 10 }
+        }
+        return state
     }
 
     @objc func getZoom(_ call: CAPPluginCall) {

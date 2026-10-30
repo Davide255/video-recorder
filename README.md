@@ -249,6 +249,8 @@ The demo app can be found in the Example folder of this repo
 * [`disableFlash()`](#disableflash)
 * [`isFlashAvailable()`](#isflashavailable)
 * [`isFlashEnabled()`](#isflashenabled)
+* [`getZoom()`](#getzoom)
+* [`setZoom(...)`](#setzoom)
 * [`addPreviewFrameConfig(...)`](#addpreviewframeconfig)
 * [`editPreviewFrameConfig(...)`](#editpreviewframeconfig)
 * [`switchToPreviewFrame(...)`](#switchtopreviewframe)
@@ -351,6 +353,40 @@ isFlashEnabled() => Promise<{ isEnabled: boolean; }>
 ```
 
 **Returns:** <code>Promise&lt;{ isEnabled: boolean; }&gt;</code>
+
+--------------------
+
+
+### getZoom()
+
+```typescript
+getZoom() => Promise<VideoRecorderZoom>
+```
+
+Returns the current zoom factor and the range the active camera allows.
+Zoom is not supported on Android: there `min` and `max` are both 1.
+
+**Returns:** <code>Promise&lt;<a href="#videorecorderzoom">VideoRecorderZoom</a>&gt;</code>
+
+--------------------
+
+
+### setZoom(...)
+
+```typescript
+setZoom(options: { factor: number; }) => Promise<VideoRecorderZoom>
+```
+
+Sets the zoom factor of the active camera, clamped to its range, and returns the
+resulting state. It applies to the preview and to the recording, also while recording.
+The factor starts again from 1 when the camera is switched or flipped.
+Android: no-op, resolves with `min` and `max` of 1.
+
+| Param         | Type                             |
+| ------------- | -------------------------------- |
+| **`options`** | <code>{ factor: number; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#videorecorderzoom">VideoRecorderZoom</a>&gt;</code>
 
 --------------------
 
@@ -639,13 +675,24 @@ Fired while `editVideo()` is transcoding.
 | **`mirrorFrontCam`** | <code>boolean</code>                                                | Whether to mirror the front camera preview horizontally. Only applies to front camera. | <code>true</code> |
 
 
+#### VideoRecorderZoom
+
+| Prop         | Type                  | Description                                                                                                                                                             |
+| ------------ | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`factor`** | <code>number</code>   |                                                                                                                                                                         |
+| **`min`**    | <code>number</code>   |                                                                                                                                                                         |
+| **`max`**    | <code>number</code>   |                                                                                                                                                                         |
+| **`unit`**   | <code>number</code>   | The factor that is "1×" for the user. On iOS phones with several back lenses the camera zooms across all of them and 1× (the main lens) is not factor 1. Defaults to 1. |
+| **`stops`**  | <code>number[]</code> | Lenses as user-facing zoom values (e.g. 0.5, 1, 3), when the camera switches between them.                                                                              |
+
+
 #### VideoRecorderCameraInfo
 
-| Prop           | Type                                              | Description                                      |
-| -------------- | ------------------------------------------------- | ------------------------------------------------ |
-| **`id`**       | <code>string</code>                               | Unique device identifier to pass to switchCamera |
-| **`position`** | <code>'front' \| 'back'</code>                    |                                                  |
-| **`type`**     | <code>'wide' \| 'ultrawide' \| 'telephoto'</code> |                                                  |
+| Prop           | Type                                                        | Description                                      |
+| -------------- | ----------------------------------------------------------- | ------------------------------------------------ |
+| **`id`**       | <code>string</code>                                         | Unique device identifier to pass to switchCamera |
+| **`position`** | <code>'front' \| 'back'</code>                              |                                                  |
+| **`type`**     | <code>'wide' \| 'ultrawide' \| 'telephoto' \| 'auto'</code> |                                                  |
 
 
 #### VideoRecorderQualityInfo
