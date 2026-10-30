@@ -173,6 +173,8 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         CAPPluginMethod(name: "disableFlash", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isFlashAvailable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isFlashEnabled", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getZoom", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setZoom", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "addPreviewFrameConfig", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "editPreviewFrameConfig", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "switchToPreviewFrame", returnType: CAPPluginReturnPromise),
@@ -1405,6 +1407,49 @@ public class VideoRecorder: CAPPlugin, AVCaptureFileOutputRecordingDelegate, AVC
         self._isFlashEnabled = !self._isFlashEnabled
         self.applyTorchState()
         call.resolve()
+    }
+
+    /// Upper bound for zoom, whatever the device allows: past it the image is only a crop.
+    private static let maxZoomFactor: CGFloat = 10
+
+    private func zoomState(of device: AVCaptureDevice) -> [String: Any] {
+        return [
+            "factor": device.videoZoomFactor,
+            "min": device.minAvailableVideoZoomFactor,
+            "max": min(device.maxAvailableVideoZoomFactor, VideoRecorder.maxZoomFactor)
+        ]
+    }
+
+    @objc func getZoom(_ call: CAPPluginCall) {
+        guard let device = self.cameraInput?.device else {
+            call.reject("Camera not initialized")
+            return
+        }
+        call.resolve(self.zoomState(of: device))
+    }
+
+    @objc func setZoom(_ call: CAPPluginCall) {
+        guard let device = self.cameraInput?.device else {
+            call.reject("Camera not initialized")
+            return
+        }
+        guard let requested = call.getDouble("factor") else {
+            call.reject("factor is required")
+            return
+        }
+        let state = self.zoomState(of: device)
+        let lower = state["min"] as! CGFloat
+        let upper = state["max"] as! CGFloat
+        do {
+            try device.lockForConfiguration()
+            // Applies to the preview and to what is recorded, also while recording.
+            device.videoZoomFactor = min(max(CGFloat(requested), lower), upper)
+            device.unlockForConfiguration()
+        } catch {
+            call.reject("Could not set zoom: \(error.localizedDescription)")
+            return
+        }
+        call.resolve(self.zoomState(of: device))
     }
 
     private func applyTorchState() {

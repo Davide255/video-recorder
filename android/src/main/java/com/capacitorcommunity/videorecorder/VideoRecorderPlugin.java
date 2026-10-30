@@ -428,6 +428,26 @@ public class VideoRecorderPlugin extends Plugin {
         call.resolve(object);
     }
 
+    // FancyCamera exposes no zoom, so on Android the range is the single factor 1 and
+    // callers are expected to hide their zoom controls.
+    private JSObject fixedZoom() {
+        JSObject object = new JSObject();
+        object.put("factor", 1);
+        object.put("min", 1);
+        object.put("max", 1);
+        return object;
+    }
+
+    @PluginMethod()
+    public void getZoom(PluginCall call) {
+        call.resolve(fixedZoom());
+    }
+
+    @PluginMethod()
+    public void setZoom(PluginCall call) {
+        call.resolve(fixedZoom());
+    }
+
     @PluginMethod()
     public void isFlashAvailable(PluginCall call) {
         JSObject object = new JSObject();

@@ -9,6 +9,18 @@ export interface VideoRecorderPlugin {
   disableFlash(): Promise<void>;
   isFlashAvailable(): Promise<{ isAvailable: boolean }>;
   isFlashEnabled(): Promise<{ isEnabled: boolean }>;
+  /**
+   * Returns the current zoom factor and the range the active camera allows.
+   * Zoom is not supported on Android: there `min` and `max` are both 1.
+   */
+  getZoom(): Promise<VideoRecorderZoom>;
+  /**
+   * Sets the zoom factor of the active camera, clamped to its range, and returns the
+   * resulting state. It applies to the preview and to the recording, also while recording.
+   * The factor starts again from 1 when the camera is switched or flipped.
+   * Android: no-op, resolves with `min` and `max` of 1.
+   */
+  setZoom(options: { factor: number }): Promise<VideoRecorderZoom>;
   addPreviewFrameConfig(config: VideoRecorderPreviewFrame): Promise<void>;
   editPreviewFrameConfig(config: VideoRecorderPreviewFrame): Promise<void>;
   switchToPreviewFrame(options: { id: string }): Promise<void>;
@@ -80,6 +92,12 @@ export interface VideoRecorderPlugin {
     eventName: 'transcodeProgress',
     listenerFunc: (info: TranscodeProgressInfo) => void,
   ): Promise<PluginListenerHandle>;
+}
+
+export interface VideoRecorderZoom {
+  factor: number;
+  min: number;
+  max: number;
 }
 
 export interface VideoRecorderCameraInfo {

@@ -5,6 +5,7 @@ import type {
 	VideoRecorderOptions,
 	VideoRecorderPreviewFrame,
 	VideoRecorderCameraInfo,
+	VideoRecorderZoom,
 	VideoRecorderCamera,
 	VideoRecorderQualityInfo,
 	VideoEditOptions,
@@ -220,6 +221,16 @@ export class VideoRecorderWeb extends WebPlugin implements VideoRecorderPlugin {
 	isFlashAvailable(): Promise<{ isAvailable: boolean; }> {
 		console.warn('VideoRecorder: No web mock available for isFlashAvailable');
 		return Promise.resolve({ isAvailable: false });
+	}
+
+	getZoom(): Promise<VideoRecorderZoom> {
+		console.warn('VideoRecorder: No web mock available for getZoom');
+		return Promise.resolve({ factor: 1, min: 1, max: 1 });
+	}
+
+	setZoom(_options: { factor: number }): Promise<VideoRecorderZoom> {
+		console.warn('VideoRecorder: No web mock available for setZoom');
+		return Promise.resolve({ factor: 1, min: 1, max: 1 });
 	}
 
 	enableMicrophone(): Promise<void> {
